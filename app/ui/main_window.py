@@ -30,13 +30,14 @@ class MainWindow(ctk.CTk):
         ("settings", "Настройки"),
     )
 
-    def __init__(self, db: Database, *, start_hidden: bool = False):
+    def __init__(self, db: Database, *, start_hidden: bool = False, enable_background: bool = True):
         ctk.set_appearance_mode(db.get_setting("theme", "dark"))
         ctk.set_default_color_theme("blue")
         super().__init__()
         self.db = db
         self.start_hidden = start_hidden
-        self.scheduler = QueueScheduler(db, self._scheduler_changed)
+        self.enable_background = enable_background
+        self.scheduler = QueueScheduler(db)
         self.views: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self.current_view = "queue"
@@ -56,17 +57,18 @@ class MainWindow(ctk.CTk):
 
         self._build_sidebar()
         self._build_views()
-        self.scheduler.sync_accounts()
 
         icon = resource_path("assets/icon.png")
         self.tray = TrayManager(icon, self.show_window, self.hide_window, self.quit_app)
-        self.tray.start()
+        if self.enable_background:
+            self.tray.start()
         set_ui_callback(lambda line, level: self.after(0, self.views["settings"].append_log, line, level))
 
         self.refresh_accounts()
         self.show_view("queue")
-        self._schedule_tick()
-        self.after(900, self.views["likes"].maybe_autostart)
+        if self.enable_background:
+            self._schedule_tick()
+            self.after(900, self.views["likes"].maybe_autostart)
         if self.start_hidden and sys.platform == "win32":
             self.after(0, self.hide_window)
         get_logger().info("Agnia Bluesky Suite %s запущена", __version__)
@@ -146,7 +148,8 @@ class MainWindow(ctk.CTk):
             self.views["settings"].refresh_log()
 
     def refresh_accounts(self) -> None:
-        self.scheduler.sync_accounts()
+        if self.enable_background:
+            self.scheduler.sync_accounts()
         for key in ("likes", "following", "posting"):
             self.views[key].refresh_accounts()
         self.views["queue"].refresh_accounts()
@@ -159,12 +162,6 @@ class MainWindow(ctk.CTk):
         self.scheduler.wake(account_id)
         self.views["queue"].refresh_accounts()
         self._update_sidebar_status()
-
-    def _scheduler_changed(self, _account_id: int) -> None:
-        try:
-            self.after(0, self._update_sidebar_status)
-        except Exception:
-            pass
 
     def _settings_changed(self) -> None:
         self.scheduler.wake_all()

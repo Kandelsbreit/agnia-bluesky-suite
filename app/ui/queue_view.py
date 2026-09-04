@@ -131,6 +131,9 @@ class QueueView(ctk.CTkFrame):
             preview = next_item["content"]
             if len(preview) > 420:
                 preview = preview[:420] + "…"
+            if account.get("last_error"):
+                error = str(account["last_error"])
+                preview += f"\n\nПоследняя ошибка: {error[:240]}{'…' if len(error) > 240 else ''}"
             self.preview.configure(text=f"{preview}\n\n{count_graphemes(next_item['content'])}/300 графем")
             self._set_actions(True)
         else:

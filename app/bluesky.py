@@ -12,7 +12,7 @@ from atproto_client.exceptions import (
     UnauthorizedError,
 )
 
-from app.utils import count_graphemes, normalize_handle
+from app.utils import normalize_handle, post_validation_error
 
 DISCOVER_FEED_URI = "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot"
 PUBLIC_SERVICE = "https://public.api.bsky.app"
@@ -233,6 +233,8 @@ class BlueskyGateway:
         clean = normalize_handle(target)
         if not clean:
             return ActionResult(False, True, "Пустой handle")
+        target_did = ""
+        target_handle = clean
         try:
             client = self._authenticated()
             profile = client.get_profile(actor=clean)
@@ -249,7 +251,11 @@ class BlueskyGateway:
         except BlueskyError:
             raise
         except Exception as exc:
-            raise _error_details(exc) from exc
+            details = _error_details(exc)
+            lowered = f"{details.code} {details}".lower()
+            if "already" in lowered and ("follow" in lowered or "following" in lowered):
+                return ActionResult(False, True, "Уже есть подписка", target_handle, target_did)
+            raise details from exc
 
     def _verify_record(self, record_key: str, expected_text: str) -> PublishResult | None:
         if not self._client or not self._profile:
@@ -275,11 +281,9 @@ class BlueskyGateway:
 
     def publish_text(self, text: str, record_key: str) -> PublishResult:
         clean_text = text.strip()
-        if not clean_text:
-            raise BlueskyError("Нельзя опубликовать пустой пост")
-        length = count_graphemes(clean_text)
-        if length > 300:
-            raise BlueskyError(f"Пост длиннее лимита Bluesky: {length}/300")
+        validation_error = post_validation_error(clean_text)
+        if validation_error:
+            raise BlueskyError(validation_error)
         try:
             client = self._authenticated()
             assert self._profile is not None

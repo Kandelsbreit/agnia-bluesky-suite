@@ -13,6 +13,8 @@ except ImportError:  # pragma: no cover - dependency is present in release build
 
 
 PROFILE_URL_RE = re.compile(r"(?:https?://)?(?:www\.)?bsky\.app/profile/([^/?#]+)", re.IGNORECASE)
+MAX_POST_GRAPHEMES = 300
+MAX_POST_BYTES = 3000
 
 
 def normalize_handle(value: str | None) -> str:
@@ -40,6 +42,19 @@ def count_graphemes(text: str | None) -> int:
     if _regex is not None:
         return len(_regex.findall(r"\X", value))
     return len(value)
+
+
+def post_validation_error(text: str | None) -> str:
+    value = normalize_text(text)
+    if not value:
+        return "Пустой текст поста"
+    graphemes = count_graphemes(value)
+    if graphemes > MAX_POST_GRAPHEMES:
+        return f"Превышен лимит Bluesky: {graphemes}/{MAX_POST_GRAPHEMES} графем"
+    byte_count = len(value.encode("utf-8"))
+    if byte_count > MAX_POST_BYTES:
+        return f"Превышен лимит Bluesky: {byte_count}/{MAX_POST_BYTES} байт UTF-8"
+    return ""
 
 
 def utcnow_iso() -> str:
@@ -73,4 +88,3 @@ def format_duration(seconds: float) -> str:
 def safe_filename(value: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]', "_", value).strip(" ._")
     return cleaned or "bluesky_account"
-

@@ -24,8 +24,14 @@ def test_parser_reports_missing_tag_empty_and_too_long():
 
 
 def test_parser_uses_grapheme_limit_not_code_points():
-    parsed = parse_content("@account: emoji.test\n\n" + "👩‍💻" * 300)
+    parsed = parse_content("@account: emoji.test\n\n" + "😀" * 300)
     assert parsed[0].valid and parsed[0].char_count == 300
+
+
+def test_parser_enforces_atproto_utf8_byte_limit():
+    parsed = parse_content("@account: emoji.test\n\n" + "👩‍💻" * 300)
+    assert not parsed[0].valid
+    assert "3300/3000 байт" in parsed[0].error
 
 
 def test_read_text_file_supports_utf8_bom_and_cp1251(tmp_path):
@@ -62,4 +68,3 @@ def test_import_can_be_cancelled_before_read(db, tmp_path):
     result = import_files([path], db, cancel_event=event)
     assert result.cancelled
     assert result.added == 0
-

@@ -9,7 +9,7 @@ import customtkinter as ctk
 from app.bluesky import BlueskyError, BlueskyGateway
 from app.database import Database
 from app.ui.common import BLUE, GREEN, RED, AccountSelector, ui_call
-from app.utils import count_graphemes, new_record_key
+from app.utils import MAX_POST_BYTES, MAX_POST_GRAPHEMES, count_graphemes, new_record_key, post_validation_error
 
 
 class PostingView(ctk.CTkFrame):
@@ -56,8 +56,14 @@ class PostingView(ctk.CTkFrame):
         return self.text_box.get("1.0", "end-1c").strip()
 
     def _update_counter(self) -> None:
-        count = count_graphemes(self._text())
-        self.counter.configure(text=f"{count}/300", text_color=RED if count > 300 else ("gray20", "gray90"))
+        text = self._text()
+        count = count_graphemes(text)
+        byte_count = len(text.encode("utf-8"))
+        too_long = count > MAX_POST_GRAPHEMES or byte_count > MAX_POST_BYTES
+        self.counter.configure(
+            text=f"{count}/{MAX_POST_GRAPHEMES} · {byte_count}/{MAX_POST_BYTES} байт",
+            text_color=RED if too_long else ("gray20", "gray90"),
+        )
 
     def _validated(self) -> tuple[int, str] | None:
         account_id = self.selector.account_id
@@ -65,12 +71,12 @@ class PostingView(ctk.CTkFrame):
         if not account_id:
             messagebox.showwarning("Нет аккаунта", "Сначала добавьте аккаунт.", parent=self)
             return None
-        count = count_graphemes(text)
         if not text:
             messagebox.showwarning("Пустой пост", "Введите текст поста.", parent=self)
             return None
-        if count > 300:
-            messagebox.showerror("Слишком длинный пост", f"Длина: {count}/300 графем.", parent=self)
+        validation_error = post_validation_error(text)
+        if validation_error:
+            messagebox.showerror("Слишком длинный пост", validation_error, parent=self)
             return None
         return account_id, text
 

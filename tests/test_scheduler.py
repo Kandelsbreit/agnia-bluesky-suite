@@ -110,3 +110,28 @@ def test_missing_password_is_reported_without_losing_post(db):
         assert db.queue_count(account) == 1
     finally:
         worker.stop()
+
+
+class PermanentFailureGateway(SuccessfulGateway):
+    calls = []
+
+    def publish_text(self, text, record_key):
+        self.__class__.calls.append((text, record_key))
+        raise BlueskyError("invalid record", retryable=False)
+
+
+def test_permanent_api_error_pauses_queue_and_retains_item(db):
+    PermanentFailureGateway.calls = []
+    account = db.save_account("invalid.test", "password")
+    db.enqueue_one(account, "Keep invalid item")
+    worker = AccountQueueWorker(account, db, gateway_factory=PermanentFailureGateway)
+    worker.start()
+    try:
+        worker.publish_now()
+        assert wait_until(lambda: bool(db.get_account(account)["queue_paused"]))
+        assert db.queue_count(account) == 1
+        assert db.next_queue_item(account)["attempt_count"] == 1
+        assert db.get_account(account)["next_scheduled_at"] is None
+        assert "invalid record" in db.get_account(account)["last_error"]
+    finally:
+        worker.stop()

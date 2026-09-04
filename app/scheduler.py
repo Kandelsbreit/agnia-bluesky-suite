@@ -166,8 +166,29 @@ class AccountQueueWorker:
                     self.db.mark_attempt_failed(item["id"], str(exc))
                 account = self.db.get_account(self.account_id) or {}
                 retry_count = int(account.get("retry_count") or 0) + 1
+                if not exc.retryable and not exc.auth_error:
+                    self._publish_now.clear()
+                    self.db.set_queue_paused(self.account_id, True)
+                    self.db.update_runtime(
+                        self.account_id,
+                        next_scheduled_at=None,
+                        retry_count=retry_count,
+                        last_error=str(exc)[:1000],
+                    )
+                    self.db.record_activity(
+                        self.account_id,
+                        "queue_post",
+                        "error",
+                        message=f"{exc}; очередь поставлена на паузу",
+                    )
+                    get_logger().error("Неповторяемая ошибка очереди аккаунта %s: %s", self.account_id, exc)
+                    self._set_status("Ошибка: очередь на паузе")
+                    self._wait(1)
+                    continue
                 step = BACKOFF_SECONDS[min(retry_count - 1, len(BACKOFF_SECONDS) - 1)]
                 if exc.auth_error:
+                    self._gateway = None
+                    self._credential_fingerprint = None
                     step = max(step, 1800)
                     self.db.update_connection(self.account_id, "Ошибка авторизации")
                 if exc.retry_after:

@@ -8,9 +8,8 @@ from pathlib import Path
 
 from app.database import Database
 from app.logging_setup import get_logger
-from app.utils import content_hash, count_graphemes, normalize_handle
+from app.utils import content_hash, count_graphemes, normalize_handle, post_validation_error
 
-MAX_POST_GRAPHEMES = 300
 BLOCK_SEPARATOR = re.compile(r"(?m)^\s*---+\s*$")
 ACCOUNT_TAG = re.compile(r"^\ufeff?@?account\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
@@ -59,10 +58,8 @@ def parse_content(content: str) -> list[ParsedPost]:
         error = ""
         if not account:
             error = "Не найдена метка @account: handle"
-        elif not text:
-            error = "Пустой текст поста"
-        elif length > MAX_POST_GRAPHEMES:
-            error = f"Превышен лимит Bluesky: {length}/300 графем"
+        else:
+            error = post_validation_error(text)
         result.append(ParsedPost(account, text, block, length, content_hash(text), error))
     return result
 
@@ -134,4 +131,3 @@ def import_files(
         summary.errors,
     )
     return summary
-

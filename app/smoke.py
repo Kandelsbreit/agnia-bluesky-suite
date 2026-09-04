@@ -51,7 +51,7 @@ def run_smoke_test() -> None:
     # packaged Tcl/Tk resources and widget/API incompatibilities without opening
     # a long-running application window.
     if sys.platform == "win32":
-        window = MainWindow(reopened)
+        window = MainWindow(reopened, enable_background=False)
         window.withdraw()
         window.update_idletasks()
         assert set(window.views) == {

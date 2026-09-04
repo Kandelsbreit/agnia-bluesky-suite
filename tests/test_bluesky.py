@@ -85,10 +85,12 @@ def test_publish_keeps_retryable_error_if_record_cannot_be_verified():
 def test_publish_validates_empty_and_grapheme_limit_before_api_call():
     client = FakeClient()
     gateway = BlueskyGateway("me.test", "app-password", client_factory=lambda **_kwargs: client)
-    with pytest.raises(BlueskyError, match="пустой"):
+    with pytest.raises(BlueskyError, match="Пустой"):
         gateway.publish_text("   ", "key")
     with pytest.raises(BlueskyError, match="301/300"):
         gateway.publish_text("x" * 301, "key")
+    with pytest.raises(BlueskyError, match="3300/3000"):
+        gateway.publish_text("👩‍💻" * 300, "key")
     assert client.created == []
 
 
@@ -96,4 +98,3 @@ def test_missing_credentials_is_explicit_auth_error():
     with pytest.raises(BlueskyError) as caught:
         BlueskyGateway("me.test", "").login()
     assert caught.value.auth_error is True
-
