@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import sqlite3
+
+
+def test_accounts_are_normalized_encrypted_and_switchable(db):
+    first = db.save_account("@First.BSky.Social", "first-password")
+    second = db.save_account("second.bsky.social", "second-password", interval_minutes=90, jitter_minutes=4)
+    assert first != second
+    assert db.get_account("FIRST.BSKY.SOCIAL")["handle"] == "first.bsky.social"
+    account, secret = db.get_account_secret(first)
+    assert account["has_password"] is True
+    assert secret == "first-password"
+    db.set_active_account(second)
+    assert db.get_active_account()["id"] == second
+
+
+def test_updating_account_without_password_preserves_secret(db):
+    account_id = db.save_account("one.test", "secret", interval_minutes=60)
+    db.save_account("one.test", None, interval_minutes=75, jitter_minutes=5)
+    account, secret = db.get_account_secret(account_id)
+    assert account["interval_minutes"] == 75
+    assert account["jitter_minutes"] == 5
+    assert secret == "secret"
+
+
+def test_queue_is_per_account_and_deduplicates_pending_and_history(db):
+    first = db.save_account("one.test")
+    second = db.save_account("two.test")
+    first_item = db.enqueue_one(first, "Same text")
+    assert first_item
+    assert db.enqueue_one(first, " Same text ") is None
+    assert db.enqueue_one(second, "Same text") is not None
+    assert db.complete_queue_item(first_item, "at://post", "cid")
+    assert db.enqueue_one(first, "Same text") is None
+    assert db.queue_count(first) == 0
+    assert db.queue_count(second) == 1
+
+
+def test_bulk_enqueue_handles_thousands_and_duplicates(db):
+    source = []
+    for index in range(2500):
+        source.append({"account_handle": f"account{index % 2}.test", "content": f"Post {index}"})
+    source.extend(source[:25])
+    added, duplicates = db.enqueue_many(source)
+    assert added == 2500
+    assert duplicates == 25
+    accounts = db.get_accounts()
+    assert len(accounts) == 2
+    assert sum(db.queue_count(int(account["id"])) for account in accounts) == 2500
+
+
+def test_queue_order_can_move_up_down_top_and_bottom(db):
+    account = db.save_account("order.test")
+    ids = [db.enqueue_one(account, text) for text in ("a", "b", "c")]
+    assert db.move_queue_item(account, ids[2], "top")
+    assert [row["content"] for row in db.get_queue(account)] == ["c", "a", "b"]
+    assert db.move_queue_item(account, ids[2], "down")
+    assert [row["content"] for row in db.get_queue(account)] == ["a", "c", "b"]
+    assert db.move_queue_item(account, ids[0], "bottom")
+    assert [row["content"] for row in db.get_queue(account)] == ["c", "b", "a"]
+
+
+def test_failed_attempt_retains_item_and_error(db):
+    account = db.save_account("retry.test")
+    queue_id = db.enqueue_one(account, "Do not lose me")
+    db.mark_attempt_failed(queue_id, "network down")
+    item = db.next_queue_item(account)
+    assert item["attempt_count"] == 1
+    assert item["last_error"] == "network down"
+    assert item["content"] == "Do not lose me"
+
+
+def test_skipped_item_enters_history_and_dedup_set(db):
+    account = db.save_account("skip.test")
+    queue_id = db.enqueue_one(account, "skip this")
+    assert db.complete_queue_item(queue_id, "", "", status="skipped")
+    history = db.get_history(account)
+    assert history[0]["status"] == "skipped"
+    assert db.enqueue_one(account, "skip this") is None
+
+
+def test_confirmed_publish_wins_over_concurrent_delete_or_skip(db):
+    account = db.save_account("race.test")
+    queue_id = db.enqueue_one(account, "in flight")
+    snapshot = db.next_queue_item(account)
+    assert db.complete_queue_item(queue_id, "", "", status="skipped")
+    assert db.complete_queue_item(
+        queue_id,
+        "at://confirmed",
+        "confirmed-cid",
+        snapshot=snapshot,
+    )
+    history = db.get_history(account)
+    assert history[0]["status"] == "published"
+    assert history[0]["post_uri"] == "at://confirmed"
+    assert db.queue_count(account) == 0
+
+
+def test_runtime_and_settings_survive_reopen(db):
+    account = db.save_account("persist.test")
+    db.enqueue_one(account, "persistent")
+    db.set_settings({"theme": "light", "like_limit": 22})
+    db.update_runtime(account, next_scheduled_at="2026-01-02T00:00:00+00:00", retry_count=3, last_error="x")
+    reopened = type(db)(db.path)
+    assert reopened.get_setting("theme") == "light"
+    assert reopened.get_int("like_limit", 0) == 22
+    assert reopened.queue_count(account) == 1
+    assert reopened.get_account(account)["retry_count"] == 3
+
+
+def test_database_enables_wal_and_foreign_keys(db):
+    with sqlite3.connect(db.path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    with db._connection() as connection:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_account_delete_cascades_queue_and_selects_replacement(db):
+    first = db.save_account("delete.test")
+    second = db.save_account("remain.test")
+    db.enqueue_one(first, "gone")
+    db.set_active_account(first)
+    db.delete_account(first)
+    assert db.get_account(first) is None
+    assert db.get_active_account()["id"] == second
+
+
+def test_activity_history_is_scoped_by_account(db):
+    first = db.save_account("first.test")
+    second = db.save_account("second.test")
+    db.record_activity(first, "like", "success", target_key="at://post/1")
+    assert db.action_was_successful(first, "like", "at://post/1")
+    assert not db.action_was_successful(second, "like", "at://post/1")

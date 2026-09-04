@@ -1,0 +1,7 @@
+atproto==0.0.71
+customtkinter==6.0.0
+httpx[socks]==0.28.1
+pillow==12.3.0
+pystray==0.19.5
+regex==2025.7.34
+

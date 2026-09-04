@@ -1,0 +1,16 @@
+@account: first.bsky.social
+
+Первый пост для первого аккаунта.
+
+---
+
+@account: second.bsky.social
+
+Отдельный пост для второго аккаунта.
+
+---
+
+@account: first.bsky.social
+
+Ещё один пост для первого аккаунта.
+

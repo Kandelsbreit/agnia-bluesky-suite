@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+release/
+*.spec.bak
+*.db
+*.db-shm
+*.db-wal
+*.log
+.idea/
+.vscode/
