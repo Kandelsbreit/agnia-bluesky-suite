@@ -175,7 +175,7 @@ class AccountQueueWorker:
                     self._publish_now.clear()
                     bad_item = self.db.next_queue_item(self.account_id)
                     if bad_item:
-                        self.db.finish_queue_item(bad_item["id"], "skipped", uri="", cid="")
+                        self.db.complete_queue_item(bad_item["id"], uri="", cid="", status="skipped")
                         get_logger().warning(
                             "[@%s] Пост #%s пропущен из-за ошибки: %s. Очередь продолжается.",
                             account.get("handle", self.account_id), bad_item["id"], exc,
@@ -197,6 +197,9 @@ class AccountQueueWorker:
                     self._set_status("Пост пропущен (ошибка)")
                     self._wait(2)
                     continue
+                failed_item = self.db.next_queue_item(self.account_id)
+                if failed_item:
+                    self.db.mark_attempt_failed(failed_item["id"], str(exc))
                 step = BACKOFF_SECONDS[min(retry_count - 1, len(BACKOFF_SECONDS) - 1)]
                 if exc.auth_error:
                     self._gateway = None

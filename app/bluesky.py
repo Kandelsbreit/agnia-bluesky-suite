@@ -337,7 +337,7 @@ class BlueskyGateway:
         if validation_error:
             raise BlueskyError(validation_error)
 
-        valid_key = record_key if is_valid_tid(record_key) else new_record_key()
+        valid_key = record_key or new_record_key()
 
         def action(client: Client) -> PublishResult:
             assert self._profile is not None

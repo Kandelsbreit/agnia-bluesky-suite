@@ -7,6 +7,7 @@ import time
 import unicodedata
 import uuid
 from datetime import UTC, datetime
+import threading
 
 try:
     import regex as _regex
@@ -86,13 +87,31 @@ def is_valid_tid(key: str | None) -> bool:
     return all(c in _TID_SET for c in key)
 
 
+_tid_lock = threading.Lock()
+_last_micros = 0
+_clock_id = 0
+
+
 def new_record_key() -> str:
-    """Canonical 13-character AT Protocol TID record key."""
-    micros = int(time.time() * 1_000_000) & 0x1FFFFFFFFFFFFF
-    clock_id = random.randint(0, 1023) & 0x3FF
-    val = (micros << 10) | clock_id
+    """Canonical 13-character AT Protocol TID record key with monotonic clock."""
+    global _last_micros, _clock_id
+    with _tid_lock:
+        now_micros = int(time.time() * 1_000_000) & 0x1FFFFFFFFFFFFF
+        if now_micros <= _last_micros:
+            _clock_id = (_clock_id + 1) & 0x3FF
+            if _clock_id == 0:
+                _last_micros = (_last_micros + 1) & 0x1FFFFFFFFFFFFF
+            micros = _last_micros
+        else:
+            _last_micros = now_micros
+            _clock_id = random.randint(0, 1023) & 0x3FF
+            micros = now_micros
+        clock = _clock_id
+
+    val = (micros << 10) | clock
     chars = [TID_ALPHABET[(val >> (5 * (12 - i))) & 0x1F] for i in range(13)]
     return "".join(chars)
+
 
 
 def format_duration(seconds: float) -> str:
