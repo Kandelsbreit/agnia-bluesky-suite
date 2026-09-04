@@ -12,7 +12,7 @@ from atproto_client.exceptions import (
     UnauthorizedError,
 )
 
-from app.utils import is_valid_tid, new_record_key, normalize_handle, post_validation_error
+from app.utils import new_record_key, normalize_handle, post_validation_error
 
 DISCOVER_FEED_URI = "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot"
 PUBLIC_SERVICE = "https://public.api.bsky.app"

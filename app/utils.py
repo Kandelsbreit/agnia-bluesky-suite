@@ -3,11 +3,10 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+import threading
 import time
 import unicodedata
-import uuid
 from datetime import UTC, datetime
-import threading
 
 try:
     import regex as _regex
