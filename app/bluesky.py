@@ -79,6 +79,9 @@ def _to_dict(value: Any) -> dict[str, Any]:
     raise TypeError(f"Unsupported Bluesky response type: {type(value).__name__}")
 
 
+DEFAULT_REQUEST_TIMEOUT = 25.0
+
+
 def _error_details(exc: Exception) -> BlueskyError:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -95,9 +98,22 @@ def _error_details(exc: Exception) -> BlueskyError:
             retry_after = max(1, int(float(header)))
         except (TypeError, ValueError):
             pass
-    auth_error = isinstance(exc, UnauthorizedError) or status in {401, 403}
-    rate_limited = status == 429 or code.lower() in {"ratelimitexceeded", "ratelimited"}
-    retryable = isinstance(exc, NetworkError | InvokeTimeoutError) or rate_limited or bool(status and status >= 500)
+    code_lower = code.lower()
+    msg_lower = message.lower()
+    auth_error = (
+        isinstance(exc, UnauthorizedError)
+        or status in {401, 403}
+        or "expiredtoken" in code_lower
+        or "invalidtoken" in code_lower
+        or "token has expired" in msg_lower
+        or "authentication required" in msg_lower
+    )
+    rate_limited = status == 429 or code_lower in {"ratelimitexceeded", "ratelimited"}
+    retryable = (
+        isinstance(exc, NetworkError | InvokeTimeoutError)
+        or rate_limited
+        or bool(status and status >= 500)
+    )
     return BlueskyError(
         message,
         retryable=retryable,
@@ -130,12 +146,16 @@ class BlueskyGateway:
         return self._profile
 
     def _new_client(self, public: bool = False) -> Client:
+        kwargs: dict[str, Any] = {}
         if public:
+            kwargs["base_url"] = PUBLIC_SERVICE
+        try:
+            return self._client_factory(request_timeout=DEFAULT_REQUEST_TIMEOUT, **kwargs)
+        except TypeError:
             try:
-                return self._client_factory(base_url=PUBLIC_SERVICE)
+                return self._client_factory(**kwargs)
             except TypeError:
                 return self._client_factory()
-        return self._client_factory()
 
     def login(self, force: bool = False) -> Profile:
         if not self.handle or not self.app_password:
@@ -166,6 +186,20 @@ class BlueskyGateway:
         assert self._client is not None
         return self._client
 
+    def _with_reauth(self, action: Callable[[Client], Any]) -> Any:
+        client = self._authenticated()
+        try:
+            return action(client)
+        except Exception as exc:
+            details = _error_details(exc)
+            if details.auth_error and self.handle and self.app_password:
+                with self._lock:
+                    self._client = None
+                self.login(force=True)
+                assert self._client is not None
+                return action(self._client)
+            raise details from exc
+
     def resolve_profile(self, actor: str | None = None) -> Profile:
         clean = normalize_handle(actor or self.handle)
         if not clean:
@@ -184,9 +218,11 @@ class BlueskyGateway:
             raise _error_details(exc) from exc
 
     def get_timeline(self, limit: int = 50, cursor: str | None = None) -> tuple[list[dict], str | None]:
-        try:
-            response = self._authenticated().get_timeline(limit=min(100, max(1, limit)), cursor=cursor)
+        def action(client: Client):
+            response = client.get_timeline(limit=min(100, max(1, limit)), cursor=cursor)
             return [_to_dict(item) for item in response.feed], response.cursor
+        try:
+            return self._with_reauth(action)
         except BlueskyError:
             raise
         except Exception as exc:
@@ -196,9 +232,11 @@ class BlueskyGateway:
         params: dict[str, Any] = {"feed": DISCOVER_FEED_URI, "limit": min(100, max(1, limit))}
         if cursor:
             params["cursor"] = cursor
-        try:
-            response = self._authenticated().app.bsky.feed.get_feed(params=params)
+        def action(client: Client):
+            response = client.app.bsky.feed.get_feed(params=params)
             return [_to_dict(item) for item in response.feed], response.cursor
+        try:
+            return self._with_reauth(action)
         except BlueskyError:
             raise
         except Exception as exc:
@@ -208,19 +246,26 @@ class BlueskyGateway:
         params: dict[str, Any] = {"q": query.strip(), "limit": min(100, max(1, limit))}
         if cursor:
             params["cursor"] = cursor
-        try:
-            response = self._authenticated().app.bsky.feed.search_posts(params=params)
+        def action(client: Client):
+            response = client.app.bsky.feed.search_posts(params=params)
             return [{"post": _to_dict(post)} for post in response.posts], response.cursor
+        try:
+            return self._with_reauth(action)
         except BlueskyError:
             raise
         except Exception as exc:
             raise _error_details(exc) from exc
 
     def like(self, uri: str, cid: str) -> ActionResult:
-        try:
-            self._authenticated().like(uri=uri, cid=cid)
+        def action(client: Client):
+            client.like(uri=uri, cid=cid)
             return ActionResult(True, False, "Лайк поставлен", target_key=uri)
-        except BlueskyError:
+        try:
+            return self._with_reauth(action)
+        except BlueskyError as exc:
+            lowered = f"{exc.code} {exc}".lower()
+            if "already" in lowered and "like" in lowered:
+                return ActionResult(False, True, "Пост уже лайкнут", target_key=uri)
             raise
         except Exception as exc:
             details = _error_details(exc)
@@ -235,8 +280,8 @@ class BlueskyGateway:
             return ActionResult(False, True, "Пустой handle")
         target_did = ""
         target_handle = clean
-        try:
-            client = self._authenticated()
+        def action(client: Client):
+            nonlocal target_did, target_handle
             profile = client.get_profile(actor=clean)
             target_did = str(_field(profile, "did", ""))
             target_handle = str(_field(profile, "handle", clean))
@@ -248,7 +293,12 @@ class BlueskyGateway:
                 return ActionResult(False, True, "Уже есть подписка", target_handle, target_did)
             client.follow(subject=target_did)
             return ActionResult(True, False, "Подписка оформлена", target_handle, target_did)
-        except BlueskyError:
+        try:
+            return self._with_reauth(action)
+        except BlueskyError as exc:
+            lowered = f"{exc.code} {exc}".lower()
+            if "already" in lowered and ("follow" in lowered or "following" in lowered):
+                return ActionResult(False, True, "Уже есть подписка", target_handle, target_did)
             raise
         except Exception as exc:
             details = _error_details(exc)
@@ -258,10 +308,10 @@ class BlueskyGateway:
             raise details from exc
 
     def _verify_record(self, record_key: str, expected_text: str) -> PublishResult | None:
-        if not self._client or not self._profile:
+        if not self._profile:
             return None
-        try:
-            response = self._client.com.atproto.repo.get_record(
+        def action(client: Client):
+            response = client.com.atproto.repo.get_record(
                 models.ComAtprotoRepoGetRecord.Params(
                     repo=self._profile.did,
                     collection=POST_COLLECTION,
@@ -276,6 +326,8 @@ class BlueskyGateway:
                 cid=str(_field(response, "cid", "") or ""),
                 recovered_existing=True,
             )
+        try:
+            return self._with_reauth(action)
         except Exception:
             return None
 
@@ -284,8 +336,8 @@ class BlueskyGateway:
         validation_error = post_validation_error(clean_text)
         if validation_error:
             raise BlueskyError(validation_error)
-        try:
-            client = self._authenticated()
+
+        def action(client: Client) -> PublishResult:
             assert self._profile is not None
             record = models.AppBskyFeedPost.Record(
                 text=clean_text,
@@ -297,7 +349,20 @@ class BlueskyGateway:
                 rkey=record_key,
             )
             return PublishResult(uri=str(response.uri), cid=str(response.cid))
-        except BlueskyError:
+
+        try:
+            return self._with_reauth(action)
+        except BlueskyError as exc:
+            lowered = f"{exc.code} {exc}".lower()
+            might_exist = (
+                "already" in lowered
+                or "recordexists" in lowered
+                or exc.retryable
+            )
+            if might_exist:
+                recovered = self._verify_record(record_key, clean_text)
+                if recovered:
+                    return recovered
             raise
         except Exception as exc:
             details = _error_details(exc)

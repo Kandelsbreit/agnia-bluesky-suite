@@ -178,6 +178,13 @@ class QueueView(ctk.CTkFrame):
         if not worker:
             return
         self.worker_status.configure(text=worker.status)
+        if worker.status != "Публикация" and self.cached_next_id:
+            self.now_button.configure(state="normal")
+        account = self.db.get_account(account_id) or {}
+        is_paused = bool(account.get("queue_paused"))
+        wanted_text = "Продолжить" if is_paused else "Пауза"
+        if self.pause_button.cget("text") != wanted_text:
+            self.pause_button.configure(text=wanted_text)
         if worker.next_run_timestamp:
             remaining = worker.next_run_timestamp - time.time()
             clock = datetime.fromtimestamp(worker.next_run_timestamp).strftime("%H:%M:%S")
@@ -225,7 +232,13 @@ class QueueView(ctk.CTkFrame):
         threading.Thread(target=work, name="queue-import", daemon=True).start()
 
     def publish_now(self) -> None:
-        if self.account_id and messagebox.askyesno("Публикация", "Опубликовать верхний пост сейчас?", parent=self):
+        if not self.account_id:
+            return
+        if not self.cached_next_id:
+            messagebox.showinfo("Очередь", "В очереди нет постов для публикации.", parent=self)
+            return
+        if messagebox.askyesno("Публикация", "Опубликовать верхний пост сейчас?", parent=self):
+            self.now_button.configure(state="disabled")
             self.scheduler.publish_now(self.account_id)
             self.worker_status.configure(text="Публикация...")
 

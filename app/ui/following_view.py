@@ -148,6 +148,12 @@ class FollowingView(ctk.CTkFrame):
     def _append(self, message: str) -> None:
         self.log_box.insert("end", message + "\n")
         self.log_box.see("end")
+        try:
+            line_count = int(self.log_box.index("end-1c").split(".")[0])
+            if line_count > 400:
+                self.log_box.delete("1.0", "100.0")
+        except Exception:
+            pass
 
     def _worker_event(self, event: dict) -> None:
         def update() -> None:

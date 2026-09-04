@@ -72,7 +72,7 @@ jobs:
       - name: Create release archive and checksums
         shell: pwsh
         run: |
-          $version = "1.0.0"
+          $version = (python -c "import app; print(app.__version__)").Trim()
           $bundle = "release\AgniaBlueskySuite"
           New-Item -ItemType Directory -Force -Path $bundle | Out-Null
           Copy-Item "dist\AgniaBlueskySuite.exe" $bundle
@@ -92,7 +92,7 @@ jobs:
         with:
           name: AgniaBlueskySuite-windows-x64
           path: |
-            release/AgniaBlueskySuite-v1.0.0-windows-x64.zip
+            release/AgniaBlueskySuite-v*-windows-x64.zip
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
@@ -103,7 +103,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $version = (python -c "import app; print(app.__version__)").Trim()
           gh release upload "${{ github.event.release.tag_name }}" `
             "dist\AgniaBlueskySuite.exe" `
-            "release\AgniaBlueskySuite-v1.0.0-windows-x64.zip" `
+            "release\AgniaBlueskySuite-v$version-windows-x64.zip" `
             "release\SHA256SUMS.txt" --clobber

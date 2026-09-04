@@ -98,3 +98,43 @@ def test_missing_credentials_is_explicit_auth_error():
     with pytest.raises(BlueskyError) as caught:
         BlueskyGateway("me.test", "").login()
     assert caught.value.auth_error is True
+
+
+class ReauthClient:
+    def __init__(self):
+        self.login_count = 0
+        self.post_attempts = 0
+        self.app = SimpleNamespace(
+            bsky=SimpleNamespace(
+                feed=SimpleNamespace(post=SimpleNamespace(create=self.create_post))
+            )
+        )
+        self.com = SimpleNamespace(
+            atproto=SimpleNamespace(repo=SimpleNamespace(get_record=self.get_record))
+        )
+
+    def login(self, handle, password):
+        self.login_count += 1
+        return SimpleNamespace(handle=handle, did="did:plc:me", display_name="Me")
+
+    @staticmethod
+    def get_current_time_iso():
+        return "2026-01-01T00:00:00.000Z"
+
+    def create_post(self, repo, record, rkey):
+        self.post_attempts += 1
+        if self.post_attempts == 1:
+            raise ResponseError("Token has expired", 400, "ExpiredToken")
+        return SimpleNamespace(uri=f"at://{repo}/app.bsky.feed.post/{rkey}", cid="fresh-cid")
+
+    def get_record(self, params):
+        raise ResponseError("not found", 404, "RecordNotFound")
+
+
+def test_publish_reauthenticates_automatically_on_expired_token():
+    client = ReauthClient()
+    gateway = BlueskyGateway("me.test", "app-password", client_factory=lambda **_kwargs: client)
+    result = gateway.publish_text("Hello fresh", "rkey-fresh")
+    assert result.cid == "fresh-cid"
+    assert client.login_count == 2
+    assert client.post_attempts == 2

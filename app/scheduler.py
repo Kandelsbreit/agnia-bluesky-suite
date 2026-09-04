@@ -86,7 +86,11 @@ class AccountQueueWorker:
             try:
                 account, password = self.db.get_account_secret(self.account_id)
                 if not account:
-                    break
+                    all_ids = {int(a["id"]) for a in self.db.get_accounts()}
+                    if self.account_id not in all_ids:
+                        break
+                    self._wait(2)
+                    continue
                 item = self.db.next_queue_item(self.account_id)
                 if not item:
                     self._publish_now.clear()
@@ -189,8 +193,11 @@ class AccountQueueWorker:
                 if exc.auth_error:
                     self._gateway = None
                     self._credential_fingerprint = None
-                    step = max(step, 1800)
-                    self.db.update_connection(self.account_id, "Ошибка авторизации")
+                    if not password:
+                        step = max(step, 1800)
+                        self.db.update_connection(self.account_id, "Нужен App Password")
+                    else:
+                        step = min(step, 30)
                 if exc.retry_after:
                     step = max(step, exc.retry_after)
                 step += random.randint(0, 5)

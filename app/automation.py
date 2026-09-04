@@ -232,6 +232,12 @@ class AutomationWorker(threading.Thread):
                         break
 
             if not next_cursor or next_cursor == cursor:
+                if stats["completed"] < target and not self._stop_event.is_set():
+                    self._emit("log", level="info", message="Лента просмотрена. Пауза 15 сек. перед проверкой свежих постов...")
+                    if not self._wait(15):
+                        break
+                    cursor = None
+                    continue
                 break
             cursor = next_cursor
 
