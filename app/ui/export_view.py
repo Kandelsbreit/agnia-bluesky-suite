@@ -203,7 +203,12 @@ class ExportView(ctk.CTkFrame):
                     failures.append(f"@{account['handle']}: {exc}")
                     self._append_threadsafe(f"Ошибка @{account['handle']}: {exc}")
             if not ai_export and len(results) > 1 and not self.cancel_event.is_set():
-                write_combined_queue(output / "combined_queue_posts.txt", results, options.queue_format)
+                write_combined_queue(
+                    output / "combined_queue_posts.txt",
+                    results,
+                    options.queue_format,
+                    options.oldest_first,
+                )
                 self._append_threadsafe("Создан combined_queue_posts.txt")
             ui_call(self, lambda: self._finish(results, failures, output))
 

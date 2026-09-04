@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 
 def run_smoke_test() -> None:
     """Offline smoke test used against the packaged Windows executable."""
+    progress = Path(tempfile.gettempdir(), "agnia-bluesky-smoke-progress.txt")
+
+    def checkpoint(message: str) -> None:
+        progress.write_text(message, encoding="utf-8")
+
+    checkpoint("importing packaged dependencies")
     import atproto  # noqa: F401
     import customtkinter  # noqa: F401
     if sys.platform == "win32":
@@ -13,9 +20,11 @@ def run_smoke_test() -> None:
 
     from app.database import Database
     from app.importer import parse_content
+    from app.logging_setup import set_ui_callback
     from app.paths import resource_path
     from app.ui.main_window import MainWindow  # noqa: F401
 
+    checkpoint("checking database and queue")
     db = Database()
     first = db.save_account("first.example.test", None, interval_minutes=60, jitter_minutes=2)
     second = db.save_account("second.example.test", None, interval_minutes=90, jitter_minutes=3)
@@ -51,14 +60,14 @@ def run_smoke_test() -> None:
     # packaged Tcl/Tk resources and widget/API incompatibilities without opening
     # a long-running application window.
     if sys.platform == "win32":
+        checkpoint("constructing GUI")
         window = MainWindow(reopened, enable_background=False)
         window.withdraw()
         window.update_idletasks()
         assert set(window.views) == {
             "likes", "following", "posting", "queue", "export", "accounts", "settings"
         }
-        window.quit_app()
-        try:
-            window.update()
-        except Exception:
-            pass
+        checkpoint("destroying GUI")
+        set_ui_callback(None)
+        window.destroy()
+    checkpoint("completed")

@@ -51,7 +51,7 @@ class AccountSelector(ctk.CTkFrame):
             self.variable.set("Нет аккаунтов")
             self._selected_id = None
             return
-        wanted = preferred_id or self._selected_id
+        wanted = preferred_id
         if wanted is None:
             active = self.db.get_active_account()
             wanted = int(active["id"]) if active else int(accounts[0]["id"])
@@ -79,4 +79,3 @@ def ui_call(widget, callback: Callable[[], None]) -> None:
         widget.after(0, callback)
     except Exception:
         pass
-

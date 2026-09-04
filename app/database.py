@@ -390,6 +390,20 @@ class Database:
             )
             return int(cursor.lastrowid)
 
+    def post_exists(self, account_id: int, text: str) -> bool:
+        digest = content_hash(text.strip())
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM queue WHERE account_id=? AND content_hash=?
+                UNION ALL
+                SELECT 1 FROM post_history WHERE account_id=? AND content_hash=?
+                LIMIT 1
+                """,
+                (account_id, digest, account_id, digest),
+            ).fetchone()
+            return row is not None
+
     def enqueue_many(self, items: Iterable[dict[str, str]]) -> tuple[int, int]:
         prepared = list(items)
         if not prepared:

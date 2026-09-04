@@ -19,6 +19,7 @@ class AccountDialog(ctk.CTkToplevel):
         self.account = account
         self.on_saved = on_saved
         self.verified_profile = None
+        self.verified_credentials: tuple[str, str] | None = None
         self.title("Добавить аккаунт" if not account else f"Настройки @{account['handle']}")
         self.geometry("540x430")
         self.resizable(False, False)
@@ -106,11 +107,14 @@ class AccountDialog(ctk.CTkToplevel):
             return
         self.test_button.configure(state="disabled")
         self.status.configure(text="Проверка подключения...", text_color="#DFA947")
+        self.verified_profile = None
+        self.verified_credentials = None
 
         def work() -> None:
             try:
                 profile = BlueskyGateway(handle, password or "").test_connection()
                 self.verified_profile = profile
+                self.verified_credentials = (handle, password or "")
                 if self.account:
                     self.db.update_connection(int(self.account["id"]), "Подключён", profile.display_name, profile.did)
                 ui_call(self, lambda: self._test_done(True, f"Подключено: {profile.display_name} (@{profile.handle})"))
@@ -130,23 +134,52 @@ class AccountDialog(ctk.CTkToplevel):
         if not values:
             return
         handle, password, interval, jitter = values
-        self.db.save_account(
+        effective_password = password or ""
+        if not effective_password and self.account:
+            _, effective_password = self.db.get_account_secret(int(self.account["id"]))
+        verified = (
+            self.verified_profile
+            if self.verified_credentials == (handle, effective_password)
+            else None
+        )
+        interval_changed = bool(
+            self.account
+            and (
+                int(self.account.get("interval_minutes") or 60) != interval
+                or int(self.account.get("jitter_minutes", 2)) != jitter
+            )
+        )
+        account_id = self.db.save_account(
             handle,
             password,
-            display_name=self.verified_profile.display_name if self.verified_profile else None,
-            did=self.verified_profile.did if self.verified_profile else None,
+            display_name=verified.display_name if verified else None,
+            did=verified.did if verified else None,
             interval_minutes=interval,
             jitter_minutes=jitter,
         )
+        if verified:
+            self.db.update_connection(account_id, "Подключён", verified.display_name, verified.did)
+        elif password is not None:
+            self.db.update_connection(account_id, "Не проверен")
+        if interval_changed:
+            self.db.update_runtime(account_id, next_scheduled_at=None)
         self.destroy()
         self.on_saved()
 
 
 class AccountsView(ctk.CTkFrame):
-    def __init__(self, master, db: Database, on_changed: Callable[[], None], **kwargs):
+    def __init__(
+        self,
+        master,
+        db: Database,
+        on_changed: Callable[[], None],
+        can_delete: Callable[[int], tuple[bool, str]] | None = None,
+        **kwargs,
+    ):
         super().__init__(master, **kwargs)
         self.db = db
         self.on_changed = on_changed
+        self.can_delete = can_delete
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self._build()
@@ -247,6 +280,12 @@ class AccountsView(ctk.CTkFrame):
         if queued:
             text += f"\nБудут удалены и {queued} ожидающих постов этого аккаунта."
         if messagebox.askyesno("Удаление аккаунта", text, parent=self):
-            self.db.delete_account(int(account["id"]))
+            account_id = int(account["id"])
+            if self.can_delete:
+                allowed, reason = self.can_delete(account_id)
+                if not allowed:
+                    messagebox.showwarning("Аккаунт сейчас используется", reason, parent=self)
+                    return
+            self.db.delete_account(account_id)
             self.on_changed()
             self.refresh()

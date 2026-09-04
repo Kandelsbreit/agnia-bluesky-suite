@@ -268,3 +268,9 @@ class QueueScheduler:
             for worker in list(self.workers.values()):
                 worker.stop()
             self.workers.clear()
+
+    def stop_account(self, account_id: int) -> None:
+        with self._lock:
+            worker = self.workers.pop(account_id, None)
+        if worker:
+            worker.stop()

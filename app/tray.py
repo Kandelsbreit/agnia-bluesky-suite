@@ -16,9 +16,11 @@ class TrayManager:
         self._icon = None
         self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        if sys.platform != "win32" or self._thread:
-            return
+    def start(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        if self._thread:
+            return True
         try:
             import pystray
             from PIL import Image
@@ -33,8 +35,10 @@ class TrayManager:
             self._icon = pystray.Icon("AgniaBlueskySuite", image, "Agnia Bluesky Suite", menu)
             self._thread = threading.Thread(target=self._icon.run, name="system-tray", daemon=True)
             self._thread.start()
+            return True
         except Exception as exc:
             get_logger().warning("Не удалось запустить системный трей: %s", exc)
+            return False
 
     def update_tooltip(self, text: str) -> None:
         if self._icon:
@@ -51,4 +55,3 @@ class TrayManager:
                 pass
         self._icon = None
         self._thread = None
-

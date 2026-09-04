@@ -47,8 +47,16 @@ jobs:
         shell: pwsh
         run: |
           $failure = Join-Path $env:TEMP "agnia-bluesky-smoke-failure.txt"
+          $progress = Join-Path $env:TEMP "agnia-bluesky-smoke-progress.txt"
           Remove-Item $failure -ErrorAction SilentlyContinue
-          $process = Start-Process -FilePath ".\dist\AgniaBlueskySuite.exe" -ArgumentList "--smoke-test" -Wait -PassThru
+          Remove-Item $progress -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath ".\dist\AgniaBlueskySuite.exe" -ArgumentList "--smoke-test" -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            if (Test-Path $failure) { Get-Content $failure }
+            if (Test-Path $progress) { Get-Content $progress }
+            throw "Packaged EXE smoke-test timed out after 60 seconds"
+          }
           if ($process.ExitCode -ne 0) {
             if (Test-Path $failure) { Get-Content $failure }
             throw "Packaged EXE smoke-test failed with exit code $($process.ExitCode)"

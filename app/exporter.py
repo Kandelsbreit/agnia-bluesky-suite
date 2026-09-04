@@ -222,11 +222,15 @@ def export_account(
     return result
 
 
-def write_combined_queue(path: Path, results: list[ExportResult], queue_format: bool = True) -> Path:
+def write_combined_queue(
+    path: Path,
+    results: list[ExportResult],
+    queue_format: bool = True,
+    oldest_first: bool = True,
+) -> Path:
     combined: list[tuple[str, str, str]] = []
     for result in results:
         combined.extend((created, result.handle, text) for created, text in result.posts)
-    combined.sort(key=lambda item: item[0])
+    combined.sort(key=lambda item: item[0], reverse=not oldest_first)
     _write_blocks(path, [format_block(handle, text, queue_format) for _, handle, text in combined])
     return path
-

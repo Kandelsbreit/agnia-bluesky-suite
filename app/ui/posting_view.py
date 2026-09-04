@@ -18,6 +18,7 @@ class PostingView(ctk.CTkFrame):
         self.db = db
         self.on_queue_changed = on_queue_changed
         self.busy = False
+        self.busy_account_id: int | None = None
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
         self._build()
@@ -87,9 +88,17 @@ class PostingView(ctk.CTkFrame):
         if not checked:
             return
         account_id, text = checked
+        if self.db.post_exists(account_id, text):
+            messagebox.showwarning(
+                "Дубликат",
+                "Такой текст уже есть в очереди или истории публикаций.",
+                parent=self,
+            )
+            return
         if not messagebox.askyesno("Публикация", "Опубликовать этот пост сейчас?", parent=self):
             return
         self.busy = True
+        self.busy_account_id = account_id
         self.publish_button.configure(state="disabled")
         self.status.configure(text="Публикация...")
         record_key = new_record_key()
@@ -122,6 +131,7 @@ class PostingView(ctk.CTkFrame):
 
     def _publish_done(self, success: bool, message: str) -> None:
         self.busy = False
+        self.busy_account_id = None
         self.publish_button.configure(state="normal")
         self.status.configure(text=message, text_color=GREEN if success else RED)
         if success:

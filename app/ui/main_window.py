@@ -60,8 +60,7 @@ class MainWindow(ctk.CTk):
 
         icon = resource_path("assets/icon.png")
         self.tray = TrayManager(icon, self.show_window, self.hide_window, self.quit_app)
-        if self.enable_background:
-            self.tray.start()
+        self.tray_started = self.tray.start() if self.enable_background else False
         set_ui_callback(lambda line, level: self.after(0, self.views["settings"].append_log, line, level))
 
         self.refresh_accounts()
@@ -69,7 +68,7 @@ class MainWindow(ctk.CTk):
         if self.enable_background:
             self._schedule_tick()
             self.after(900, self.views["likes"].maybe_autostart)
-        if self.start_hidden and sys.platform == "win32":
+        if self.start_hidden and sys.platform == "win32" and self.tray_started:
             self.after(0, self.hide_window)
         get_logger().info("Agnia Bluesky Suite %s запущена", __version__)
 
@@ -125,7 +124,7 @@ class MainWindow(ctk.CTk):
             "posting": PostingView(container, self.db, self._queue_changed),
             "queue": QueueView(container, self.db, self.scheduler, self.refresh_accounts),
             "export": ExportView(container, self.db),
-            "accounts": AccountsView(container, self.db, self.refresh_accounts),
+            "accounts": AccountsView(container, self.db, self.refresh_accounts, self._prepare_account_delete),
             "settings": SettingsView(container, self.db, self._settings_changed),
         }
         for view in self.views.values():
@@ -140,6 +139,8 @@ class MainWindow(ctk.CTk):
             button.configure(fg_color=("#CFE4FF", "#1E4774") if name == key else "transparent")
         if key == "queue":
             self.views["queue"].refresh()
+        elif key in {"likes", "following", "posting"}:
+            self.views[key].refresh_accounts()
         elif key == "accounts":
             self.views["accounts"].refresh()
         elif key == "export":
@@ -150,6 +151,7 @@ class MainWindow(ctk.CTk):
     def refresh_accounts(self) -> None:
         if self.enable_background:
             self.scheduler.sync_accounts()
+            self.scheduler.wake_all()
         for key in ("likes", "following", "posting"):
             self.views[key].refresh_accounts()
         self.views["queue"].refresh_accounts()
@@ -165,6 +167,20 @@ class MainWindow(ctk.CTk):
 
     def _settings_changed(self) -> None:
         self.scheduler.wake_all()
+
+    def _prepare_account_delete(self, account_id: int) -> tuple[bool, str]:
+        for key, label in (("likes", "лайкинг"), ("following", "фолловинг")):
+            worker = self.views[key].worker
+            if worker and worker.account_id == account_id and worker.is_alive():
+                return False, f"Сначала остановите {label} для этого аккаунта."
+        posting = self.views["posting"]
+        if posting.busy and posting.busy_account_id == account_id:
+            return False, "Дождитесь завершения ручной публикации."
+        queue_worker = self.scheduler.worker(account_id)
+        if queue_worker and queue_worker.status == "Публикация":
+            return False, "Дождитесь завершения текущей публикации из очереди."
+        self.scheduler.stop_account(account_id)
+        return True, ""
 
     def _update_sidebar_status(self) -> None:
         stats = self.db.stats()
@@ -206,7 +222,7 @@ class MainWindow(ctk.CTk):
             pass
 
     def on_close(self) -> None:
-        if sys.platform == "win32" and self.db.get_bool("close_to_tray", True):
+        if sys.platform == "win32" and self.tray_started and self.db.get_bool("close_to_tray", True):
             self.hide_window()
         else:
             self.quit_app()

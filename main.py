@@ -18,13 +18,16 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _run_smoke() -> int:
     failure = Path(tempfile.gettempdir(), "agnia-bluesky-smoke-failure.txt")
+    progress = Path(tempfile.gettempdir(), "agnia-bluesky-smoke-progress.txt")
     failure.unlink(missing_ok=True)
+    progress.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="agnia-bsky-smoke-") as temporary:
         os.environ["AGNIA_BLUESKY_DATA_DIR"] = temporary
         try:
             from app.smoke import run_smoke_test
 
             run_smoke_test()
+            progress.unlink(missing_ok=True)
             return 0
         except Exception:
             import traceback

@@ -107,3 +107,10 @@ def test_combined_queue_contains_each_account(tmp_path):
     path = write_combined_queue(tmp_path / "combined.txt", [second, first])
     text = path.read_text(encoding="utf-8")
     assert text.index("@account: me.test") < text.index("@account: other.test")
+    reversed_path = write_combined_queue(
+        tmp_path / "combined-newest.txt",
+        [second, first],
+        oldest_first=False,
+    )
+    reversed_text = reversed_path.read_text(encoding="utf-8")
+    assert reversed_text.index("@account: other.test") < reversed_text.index("@account: me.test")

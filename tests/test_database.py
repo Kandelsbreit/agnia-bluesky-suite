@@ -35,6 +35,9 @@ def test_queue_is_per_account_and_deduplicates_pending_and_history(db):
     assert db.enqueue_one(first, "Same text") is None
     assert db.queue_count(first) == 0
     assert db.queue_count(second) == 1
+    assert db.post_exists(first, "Same text")
+    assert db.post_exists(second, "Same text")
+    assert not db.post_exists(first, "Different")
 
 
 def test_bulk_enqueue_handles_thousands_and_duplicates(db):
