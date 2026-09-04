@@ -63,6 +63,9 @@ class MainWindow(ctk.CTk):
         self.tray_started = self.tray.start() if self.enable_background else False
         set_ui_callback(lambda line, level: self.after(0, self.views["settings"].append_log, line, level))
 
+        if self.enable_background and self.db.get_bool("auto_unpause_queues_on_start", True):
+            self.db.unpause_all_queues()
+
         self.refresh_accounts()
         self.show_view("queue")
         if self.enable_background:
@@ -169,10 +172,11 @@ class MainWindow(ctk.CTk):
         self.scheduler.wake_all()
 
     def _prepare_account_delete(self, account_id: int) -> tuple[bool, str]:
-        for key, label in (("likes", "лайкинг"), ("following", "фолловинг")):
-            worker = self.views[key].worker
-            if worker and worker.account_id == account_id and worker.is_alive():
-                return False, f"Сначала остановите {label} для этого аккаунта."
+        if self.views["likes"].is_busy(account_id):
+            return False, "Сначала остановите лайкинг для этого аккаунта."
+        worker = self.views["following"].worker
+        if worker and worker.account_id == account_id and worker.is_alive():
+            return False, "Сначала остановите фолловинг для этого аккаунта."
         posting = self.views["posting"]
         if posting.busy and posting.busy_account_id == account_id:
             return False, "Дождитесь завершения ручной публикации."
@@ -235,10 +239,10 @@ class MainWindow(ctk.CTk):
         def finish() -> None:
             get_logger().info("Agnia Bluesky Suite завершает работу")
             set_ui_callback(None)
-            for key in ("likes", "following"):
-                worker = self.views[key].worker
-                if worker and worker.is_alive():
-                    worker.stop()
+            self.views["likes"].stop()
+            following_worker = self.views["following"].worker
+            if following_worker and following_worker.is_alive():
+                following_worker.stop()
             if self.views["export"].running:
                 self.views["export"].stop()
             self.scheduler.stop_all()

@@ -26,8 +26,13 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "break_duration_max": "300",
     "like_limit": "100",
     "follow_limit": "30",
-    "auto_like_enabled": "0",
+    "auto_like_enabled": "1",
     "auto_like_account_id": "",
+    "auto_like_all_accounts": "1",
+    "auto_like_account_ids": "",
+    "auto_like_247_mode": "1",
+    "auto_like_cycle_interval": "60",
+    "auto_unpause_queues_on_start": "1",
     "auto_like_source": "timeline",
     "auto_like_query": "",
     "auto_like_skip_replies": "1",
@@ -346,6 +351,11 @@ class Database:
                 "UPDATE accounts SET queue_paused=?, updated_at=? WHERE id=?",
                 (1 if paused else 0, utcnow_iso(), account_id),
             )
+
+    def unpause_all_queues(self) -> int:
+        with self._write() as connection:
+            cursor = connection.execute("UPDATE accounts SET queue_paused=0, updated_at=? WHERE queue_paused=1", (utcnow_iso(),))
+            return cursor.rowcount
 
     def update_runtime(self, account_id: int, **values: Any) -> None:
         allowed = {"next_scheduled_at", "last_posted_at", "retry_count", "last_error"}

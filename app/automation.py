@@ -25,6 +25,9 @@ class AutomationOptions:
     break_every_max: int = 25
     break_duration_min: int = 120
     break_duration_max: int = 300
+    continuous: bool = False
+    cycle_interval_minutes: int = 60
+    cycle_jitter_minutes: int = 15
 
 
 class AutomationWorker(threading.Thread):
@@ -76,7 +79,7 @@ class AutomationWorker(threading.Thread):
         self._resume_event.set()
 
     def _emit(self, kind: str, **data: Any) -> None:
-        event = {"kind": kind, "mode": self.mode, **data}
+        event = {"kind": kind, "mode": self.mode, "account_id": self.account_id, **data}
         if self.callback:
             try:
                 self.callback(event)
@@ -146,100 +149,188 @@ class AutomationWorker(threading.Thread):
         return random.randint(minimum, maximum)
 
     def _run_likes(self, gateway: BlueskyGateway, own_did: str, stats: dict[str, Any]) -> None:
-        cursor = None
-        next_break = self._next_break()
-        failed_pages = 0
         target = max(1, self.options.limit)
-        self._emit("log", level="info", message=f"Лайкинг: источник={self.source}, цель={target}")
+        self._emit(
+            "log",
+            level="info",
+            message=f"[@{gateway.handle}] Лайкинг: источник={self.source}, лимит={target} за цикл",
+        )
 
-        while stats["completed"] < target and not self._stop_event.is_set():
-            self._resume_event.wait()
-            if self._stop_event.is_set():
-                break
-            try:
-                if self.source == "discover":
-                    feed, next_cursor = gateway.get_discover_feed(50, cursor)
-                elif self.source == "search":
-                    if not self.query:
-                        raise BlueskyError("Для поиска нужен хештег или текст запроса")
-                    feed, next_cursor = gateway.search_posts(self.query, 50, cursor)
-                else:
-                    feed, next_cursor = gateway.get_timeline(50, cursor)
-                failed_pages = 0
-            except BlueskyError as exc:
-                stats["errors"] += 1
-                failed_pages += 1
-                self._emit("log", level="error", message=f"Ошибка загрузки ленты: {exc}")
-                if failed_pages >= 5 or not self._wait(exc.retry_after or 10):
-                    break
-                continue
+        while not self._stop_event.is_set():
+            cursor = None
+            next_break = self._next_break()
+            failed_pages = 0
+            cycle_completed = 0
 
-            for item in feed:
-                if self._stop_event.is_set() or stats["completed"] >= target:
-                    break
+            while cycle_completed < target and not self._stop_event.is_set():
                 self._resume_event.wait()
                 if self._stop_event.is_set():
                     break
-                post = item.get("post") or {}
-                uri = str(post.get("uri") or "")
-                cid = str(post.get("cid") or "")
-                author = post.get("author") or {}
-                author_did = str(author.get("did") or "")
-                author_handle = str(author.get("handle") or "")
-                record = post.get("record") or {}
-                viewer = post.get("viewer") or {}
-
-                should_skip = (
-                    not uri
-                    or not cid
-                    or author_did == own_did
-                    or (self.skip_reposts and item.get("reason") is not None)
-                    or (self.skip_replies and bool(record.get("reply")))
-                    or bool(viewer.get("like"))
-                    or self.db.action_was_successful(self.account_id, "like", uri)
-                )
-                if should_skip:
-                    stats["skipped"] += 1
-                    continue
                 try:
-                    result = gateway.like(uri, cid)
-                    if result.skipped:
-                        stats["skipped"] += 1
-                        self.db.record_activity(
-                            self.account_id, "like", "skipped", target_key=uri,
-                            target_handle=author_handle, message=result.message,
-                        )
-                        continue
-                    stats["completed"] += 1
-                    self.db.record_activity(
-                        self.account_id, "like", "success", target_key=uri,
-                        target_handle=author_handle, message=result.message,
-                    )
-                    get_logger().info("[@%s] Лайк @%s", gateway.handle, author_handle)
-                    self._emit("progress", current=stats["completed"], total=target, stats=dict(stats))
-                    if stats["completed"] < target:
-                        next_break = self._action_delay(stats["completed"], next_break)
+                    if self.source == "discover":
+                        feed, next_cursor = gateway.get_discover_feed(50, cursor)
+                    elif self.source == "search":
+                        if not self.query:
+                            raise BlueskyError("Для поиска нужен хештег или текст запроса")
+                        feed, next_cursor = gateway.search_posts(self.query, 50, cursor)
+                    else:
+                        feed, next_cursor = gateway.get_timeline(50, cursor)
+                    failed_pages = 0
                 except BlueskyError as exc:
                     stats["errors"] += 1
-                    self.db.record_activity(
-                        self.account_id, "like", "error", target_key=uri,
-                        target_handle=author_handle, message=str(exc),
+                    failed_pages += 1
+                    self._emit("log", level="error", message=f"[@{gateway.handle}] Ошибка загрузки ленты: {exc}")
+                    if exc.auth_error:
+                        return
+                    if failed_pages >= 5:
+                        if self.options.continuous:
+                            self._emit(
+                                "log",
+                                level="warning",
+                                message=f"[@{gateway.handle}] Слишком много ошибок сети, ожидание 5 минут перед повтором...",
+                            )
+                            if not self._wait(300):
+                                return
+                            failed_pages = 0
+                            continue
+                        return
+                    if not self._wait(exc.retry_after or 10):
+                        return
+                    continue
+
+                for item in feed:
+                    if self._stop_event.is_set() or cycle_completed >= target:
+                        break
+                    self._resume_event.wait()
+                    if self._stop_event.is_set():
+                        break
+                    post = item.get("post") or {}
+                    uri = str(post.get("uri") or "")
+                    cid = str(post.get("cid") or "")
+                    author = post.get("author") or {}
+                    author_did = str(author.get("did") or "")
+                    author_handle = str(author.get("handle") or "")
+                    record = post.get("record") or {}
+                    viewer = post.get("viewer") or {}
+
+                    should_skip = (
+                        not uri
+                        or not cid
+                        or author_did == own_did
+                        or (self.skip_reposts and item.get("reason") is not None)
+                        or (self.skip_replies and bool(record.get("reply")))
+                        or bool(viewer.get("like"))
+                        or self.db.action_was_successful(self.account_id, "like", uri)
                     )
-                    self._emit("log", level="error", message=f"Не удалось лайкнуть @{author_handle}: {exc}")
-                    if exc.auth_error or not self._wait(exc.retry_after or 3):
+                    if should_skip:
+                        stats["skipped"] += 1
+                        continue
+                    try:
+                        result = gateway.like(uri, cid)
+                        if result.skipped:
+                            stats["skipped"] += 1
+                            self.db.record_activity(
+                                self.account_id,
+                                "like",
+                                "skipped",
+                                target_key=uri,
+                                target_handle=author_handle,
+                                message=result.message,
+                            )
+                            continue
+                        stats["completed"] += 1
+                        cycle_completed += 1
+                        self.db.record_activity(
+                            self.account_id,
+                            "like",
+                            "success",
+                            target_key=uri,
+                            target_handle=author_handle,
+                            message=result.message,
+                        )
+                        get_logger().info("[@%s] Лайк @%s", gateway.handle, author_handle)
+                        self._emit(
+                            "progress",
+                            current=cycle_completed,
+                            total=target,
+                            total_completed=stats["completed"],
+                            handle=gateway.handle,
+                            stats=dict(stats),
+                        )
+                        if cycle_completed < target:
+                            next_break = self._action_delay(cycle_completed, next_break)
+                    except BlueskyError as exc:
+                        stats["errors"] += 1
+                        self.db.record_activity(
+                            self.account_id,
+                            "like",
+                            "error",
+                            target_key=uri,
+                            target_handle=author_handle,
+                            message=str(exc),
+                        )
+                        self._emit("log", level="error", message=f"[@{gateway.handle}] Не удалось лайкнуть @{author_handle}: {exc}")
                         if exc.auth_error:
                             return
-                        break
+                        if not self._wait(exc.retry_after or 3):
+                            return
 
-            if not next_cursor or next_cursor == cursor:
-                if stats["completed"] < target and not self._stop_event.is_set():
-                    self._emit("log", level="info", message="Лента просмотрена. Пауза 15 сек. перед проверкой свежих постов...")
-                    if not self._wait(15):
-                        break
-                    cursor = None
-                    continue
+                if not next_cursor or next_cursor == cursor:
+                    if cycle_completed < target and not self._stop_event.is_set():
+                        self._emit(
+                            "log",
+                            level="info",
+                            message=f"[@{gateway.handle}] Лента просмотрена. Пауза 20 сек. перед повторной проверкой...",
+                        )
+                        if not self._wait(20):
+                            return
+                        cursor = None
+                        continue
+                    break
+                cursor = next_cursor
+
+            if not self.options.continuous or self._stop_event.is_set():
                 break
-            cursor = next_cursor
+
+            jitter = random.randint(-max(0, self.options.cycle_jitter_minutes), max(0, self.options.cycle_jitter_minutes))
+            rest_minutes = max(1, self.options.cycle_interval_minutes + jitter)
+            rest_seconds = rest_minutes * 60
+            wake_time = time.strftime("%H:%M", time.localtime(time.time() + rest_seconds))
+            self._emit(
+                "log",
+                level="info",
+                message=f"[@{gateway.handle}] Цикл завершён ({cycle_completed} лайков). Перерыв {rest_minutes} мин. (до {wake_time}).",
+            )
+            self._emit(
+                "status",
+                message=f"Отдых до {wake_time}",
+                resting=True,
+                handle=gateway.handle,
+            )
+
+            end_time = time.monotonic() + rest_seconds
+            while time.monotonic() < end_time and not self._stop_event.is_set():
+                self._resume_event.wait()
+                if self._stop_event.is_set():
+                    return
+                remaining = int(end_time - time.monotonic())
+                if remaining > 0 and remaining % 60 == 0:
+                    mins_left = remaining // 60
+                    self._emit(
+                        "status",
+                        message=f"Отдых (~{mins_left} мин)",
+                        resting=True,
+                        handle=gateway.handle,
+                    )
+                self._stop_event.wait(min(5.0, max(0.1, end_time - time.monotonic())))
+
+            if self._stop_event.is_set():
+                return
+            self._emit(
+                "log",
+                level="info",
+                message=f"[@{gateway.handle}] Перерыв окончен. Запуск нового цикла лайкинга.",
+            )
 
     def _run_following(self, gateway: BlueskyGateway, stats: dict[str, Any]) -> None:
         unique_targets: list[str] = []
@@ -291,3 +382,137 @@ class AutomationWorker(threading.Thread):
                     break
                 if not self._wait(exc.retry_after or 4):
                     break
+
+
+class LikeAutomationManager:
+    def __init__(
+        self,
+        db: Database,
+        callback: EventCallback | None = None,
+        gateway_factory: Callable[[str, str], BlueskyGateway] = BlueskyGateway,
+    ):
+        self.db = db
+        self.callback = callback
+        self.gateway_factory = gateway_factory
+        self._workers: dict[int, AutomationWorker] = {}
+        self._lock = threading.Lock()
+
+    def is_running(self, account_id: int | None = None) -> bool:
+        with self._lock:
+            if account_id is not None:
+                worker = self._workers.get(account_id)
+                return worker is not None and worker.is_alive()
+            return any(w.is_alive() for w in self._workers.values())
+
+    def is_paused(self, account_id: int | None = None) -> bool:
+        with self._lock:
+            if account_id is not None:
+                worker = self._workers.get(account_id)
+                return bool(worker and worker.is_alive() and worker.paused)
+            running = [w for w in self._workers.values() if w.is_alive()]
+            return bool(running and all(w.paused for w in running))
+
+    def active_account_ids(self) -> list[int]:
+        with self._lock:
+            return [aid for aid, w in self._workers.items() if w.is_alive()]
+
+    def get_worker(self, account_id: int) -> AutomationWorker | None:
+        with self._lock:
+            return self._workers.get(account_id)
+
+    def start_account(
+        self,
+        account_id: int,
+        options: AutomationOptions,
+        *,
+        source: str = "timeline",
+        query: str = "",
+        skip_replies: bool = True,
+        skip_reposts: bool = True,
+    ) -> bool:
+        with self._lock:
+            existing = self._workers.get(account_id)
+            if existing and existing.is_alive():
+                return False
+            worker = AutomationWorker(
+                self.db,
+                account_id,
+                "likes",
+                options,
+                source=source,
+                query=query,
+                skip_replies=skip_replies,
+                skip_reposts=skip_reposts,
+                callback=self._handle_worker_event,
+                gateway_factory=self.gateway_factory,
+            )
+            self._workers[account_id] = worker
+            worker.start()
+            return True
+
+    def start_accounts(
+        self,
+        account_ids: list[int],
+        options: AutomationOptions,
+        *,
+        source: str = "timeline",
+        query: str = "",
+        skip_replies: bool = True,
+        skip_reposts: bool = True,
+    ) -> int:
+        started = 0
+        for aid in account_ids:
+            if self.start_account(
+                aid,
+                options,
+                source=source,
+                query=query,
+                skip_replies=skip_replies,
+                skip_reposts=skip_reposts,
+            ):
+                started += 1
+        return started
+
+    def pause_account(self, account_id: int) -> None:
+        with self._lock:
+            worker = self._workers.get(account_id)
+            if worker and worker.is_alive():
+                worker.pause()
+
+    def resume_account(self, account_id: int) -> None:
+        with self._lock:
+            worker = self._workers.get(account_id)
+            if worker and worker.is_alive():
+                worker.resume()
+
+    def toggle_pause_all(self) -> bool:
+        with self._lock:
+            running = [w for w in self._workers.values() if w.is_alive()]
+            if not running:
+                return False
+            should_resume = all(w.paused for w in running)
+            for w in running:
+                if should_resume:
+                    w.resume()
+                else:
+                    w.pause()
+            return should_resume
+
+    def stop_account(self, account_id: int) -> None:
+        with self._lock:
+            worker = self._workers.get(account_id)
+            if worker:
+                worker.stop()
+
+    def stop_all(self) -> None:
+        with self._lock:
+            for worker in list(self._workers.values()):
+                worker.stop()
+
+    def _handle_worker_event(self, event: dict[str, Any]) -> None:
+        if self.callback:
+            try:
+                self.callback(event)
+            except Exception:
+                pass
+
