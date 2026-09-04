@@ -173,3 +173,23 @@ def test_heal_legacy_queue_keys_converts_uuids_and_unpauses(db):
     acc = reopened.get_account(account)
     assert acc["queue_paused"] == 0
 
+
+def test_post_exists_in_history_and_prune_queue(db):
+    from app.utils import content_hash
+
+    account = db.save_account("history.test")
+    item_id = db.enqueue_one(account, "history-text")
+    assert item_id is not None
+    assert db.post_exists_in_history(account, "history-text") is None
+    db.complete_queue_item(item_id, "at://post/1", "cid-1")
+    assert db.post_exists_in_history(account, "history-text") is not None
+    digest = content_hash("history-text")
+    with db._write() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO queue (account_id, position, record_key, content, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (account, 1, "3mupnujqcnfhv", "history-text", digest, "2026-01-01T00:00:00+00:00"),
+        )
+    reopened = type(db)(db.path)
+    assert reopened.queue_count(account) == 0
+
+

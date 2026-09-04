@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import base64
 import ctypes
-import os
+import hashlib
+import hmac
+import secrets
 import sys
 from ctypes import wintypes
 
 _ENTROPY = b"AgniaBlueskySuite/passwords/v1"
 _DPAPI_PREFIX = "dpapi:"
 _PORTABLE_PREFIX = "portable-test:"
+_PORTABLE_V2_PREFIX = "portable-v2:"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
 
 
@@ -102,31 +105,106 @@ def _unprotect_windows(data: bytes) -> bytes:
         local_free(ctypes.cast(out_blob.pbData, wintypes.HLOCAL))
 
 
+def _get_or_create_master_key() -> bytes:
+    from app.paths import data_dir
+
+    key_file = data_dir() / ".secret_key"
+    if key_file.exists():
+        try:
+            content = key_file.read_bytes()
+            if len(content) == 32:
+                return content
+        except OSError:
+            pass
+    key = secrets.token_bytes(32)
+    try:
+        key_file.write_bytes(key)
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.kernel32.SetFileAttributesW(str(key_file), 0x02)  # FILE_ATTRIBUTE_HIDDEN
+            except Exception:
+                pass
+    except OSError:
+        pass
+    return key
+
+
+def _keystream(key: bytes, iv: bytes, length: int) -> bytes:
+    blocks = []
+    idx = 0
+    gen = 0
+    while gen < length:
+        block = hmac.new(key, iv + idx.to_bytes(4, "big"), hashlib.sha256).digest()
+        blocks.append(block)
+        gen += len(block)
+        idx += 1
+    return b"".join(blocks)[:length]
+
+
+def _encrypt_portable_v2(data: bytes, master_key: bytes | None = None) -> bytes:
+    if master_key is None:
+        master_key = _get_or_create_master_key()
+    salt = secrets.token_bytes(16)
+    iv = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac("sha256", master_key, salt, iterations=10_000, dklen=64)
+    enc_key = derived[:32]
+    mac_key = derived[32:]
+    stream = _keystream(enc_key, iv, len(data))
+    ciphertext = bytes(a ^ b for a, b in zip(data, stream))
+    tag = hmac.new(mac_key, salt + iv + ciphertext, hashlib.sha256).digest()
+    return salt + iv + tag + ciphertext
+
+
+def _decrypt_portable_v2(payload: bytes, master_key: bytes | None = None) -> bytes:
+    if len(payload) < 16 + 16 + 32:
+        raise SecretError("Invalid portable secret payload length")
+    if master_key is None:
+        master_key = _get_or_create_master_key()
+    salt = payload[:16]
+    iv = payload[16:32]
+    tag = payload[32:64]
+    ciphertext = payload[64:]
+    derived = hashlib.pbkdf2_hmac("sha256", master_key, salt, iterations=10_000, dklen=64)
+    enc_key = derived[:32]
+    mac_key = derived[32:]
+    expected_tag = hmac.new(mac_key, salt + iv + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, expected_tag):
+        raise SecretError("Portable secret authentication failed")
+    stream = _keystream(enc_key, iv, len(ciphertext))
+    return bytes(a ^ b for a, b in zip(ciphertext, stream))
+
+
 def protect_secret(secret: str) -> str:
     if not secret:
         return ""
     raw = secret.encode("utf-8")
-    if sys.platform == "win32":
-        protected = _protect_windows(raw)
-        return _DPAPI_PREFIX + base64.b64encode(protected).decode("ascii")
-    # Only used by tests/source runs on non-Windows. Release builds always use DPAPI.
-    return _PORTABLE_PREFIX + base64.b64encode(raw).decode("ascii")
+    protected = _encrypt_portable_v2(raw)
+    return _PORTABLE_V2_PREFIX + base64.b64encode(protected).decode("ascii")
 
 
 def unprotect_secret(stored: str | None) -> str:
     if not stored:
         return ""
+    if stored.startswith(_PORTABLE_V2_PREFIX):
+        payload = base64.b64decode(stored[len(_PORTABLE_V2_PREFIX):])
+        return _decrypt_portable_v2(payload).decode("utf-8")
     if stored.startswith(_DPAPI_PREFIX):
         if sys.platform != "win32":
-            raise SecretError("A Windows DPAPI secret cannot be opened on this platform")
-        payload = base64.b64decode(stored[len(_DPAPI_PREFIX):])
-        return _unprotect_windows(payload).decode("utf-8")
+            raise SecretError("Windows DPAPI secret cannot be decrypted on non-Windows")
+        try:
+            payload = base64.b64decode(stored[len(_DPAPI_PREFIX):])
+            return _unprotect_windows(payload).decode("utf-8")
+        except Exception as exc:
+            raise SecretError(f"DPAPI decryption failed: {exc}") from exc
     if stored.startswith(_PORTABLE_PREFIX):
-        if sys.platform == "win32" and not os.getenv("AGNIA_BLUESKY_ALLOW_PORTABLE_SECRET"):
-            raise SecretError("Portable test secret is disabled on Windows")
         return base64.b64decode(stored[len(_PORTABLE_PREFIX):]).decode("utf-8")
     raise SecretError("Unknown secret format")
 
 
 def secret_is_dpapi(stored: str | None) -> bool:
     return bool(stored and stored.startswith(_DPAPI_PREFIX))
+
+
+def secret_is_portable(stored: str | None) -> bool:
+    return bool(stored and (stored.startswith(_PORTABLE_V2_PREFIX) or stored.startswith(_PORTABLE_PREFIX)))
+

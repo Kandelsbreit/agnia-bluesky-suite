@@ -135,12 +135,47 @@ class AccountQueueWorker:
                 self._publish_now.clear()
                 self._wake.clear()
                 self._set_status("Публикация")
+
+                existing_in_history = self.db.post_exists_in_history(self.account_id, item["content"])
+                if existing_in_history:
+                    fresh_account = self.db.get_account(self.account_id) or account
+                    next_interval = self.calculate_interval(fresh_account)
+                    next_time = datetime.now(UTC) + timedelta(seconds=next_interval)
+                    self.db.complete_queue_item(
+                        item["id"],
+                        existing_in_history.get("post_uri") or "",
+                        existing_in_history.get("post_cid") or "",
+                        status="published",
+                        snapshot=item,
+                        next_scheduled_at=next_time.isoformat(),
+                    )
+                    get_logger().info(
+                        "[@%s] Пост #%s уже был опубликован ранее (найден в истории). Дублирование предотвращено.",
+                        account["handle"],
+                        item["id"],
+                    )
+                    self._set_status("Дубликат пропущен")
+                    self._wait(0.2)
+                    continue
+
                 gateway = self._gateway_for(account["handle"], password)
-                rkey = item.get("record_key") or ""
-                if not is_valid_tid(rkey):
-                    rkey = new_record_key()
-                    self.db.update_queue_record_key(item["id"], rkey)
-                result = gateway.publish_text(item["content"], rkey)
+                existing_on_bluesky = None
+                if hasattr(gateway, "check_recent_post"):
+                    try:
+                        existing_on_bluesky = gateway.check_recent_post(item["content"])
+                    except Exception:
+                        pass
+
+                if existing_on_bluesky:
+                    result = existing_on_bluesky
+                    note = " (обнаружен в профиле Bluesky, дублирование предотвращено)"
+                else:
+                    rkey = item.get("record_key") or ""
+                    if not is_valid_tid(rkey):
+                        rkey = new_record_key()
+                        self.db.update_queue_record_key(item["id"], rkey)
+                    result = gateway.publish_text(item["content"], rkey)
+                    note = " (восстановлено после обрыва)" if result.recovered_existing else ""
                 fresh_account = self.db.get_account(self.account_id) or account
                 next_interval = self.calculate_interval(fresh_account)
                 next_time = datetime.now(UTC) + timedelta(seconds=next_interval)
@@ -157,7 +192,6 @@ class AccountQueueWorker:
                     gateway.profile.display_name if gateway.profile else "",
                     gateway.profile.did if gateway.profile else "",
                 )
-                note = " (восстановлено после обрыва)" if result.recovered_existing else ""
                 self.db.record_activity(
                     self.account_id,
                     "queue_post",

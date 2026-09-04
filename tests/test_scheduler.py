@@ -139,3 +139,27 @@ def test_non_retryable_api_error_skips_post_and_continues_queue(db):
     finally:
         worker.stop()
 
+
+class DuplicateGateway(SuccessfulGateway):
+    def check_recent_post(self, text):
+        if text == "Already on Bluesky":
+            return PublishResult("at://did/post/existing", "existing-cid", recovered_existing=True)
+        return None
+
+
+def test_deduplication_prevents_reposting_from_another_machine(db):
+    account = db.save_account("dedup.test", "password", interval_minutes=60, jitter_minutes=0)
+    db.enqueue_one(account, "Already on Bluesky")
+    worker = AccountQueueWorker(account, db, gateway_factory=DuplicateGateway)
+    worker.start()
+    try:
+        worker.publish_now()
+        assert wait_until(lambda: db.queue_count(account) == 0)
+        history = db.get_history(account)
+        assert len(history) == 1
+        assert history[0]["post_uri"] == "at://did/post/existing"
+        assert history[0]["status"] == "published"
+    finally:
+        worker.stop()
+
+

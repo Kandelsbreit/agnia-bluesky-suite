@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +13,7 @@ from atproto_client.exceptions import (
     UnauthorizedError,
 )
 
-from app.utils import new_record_key, normalize_handle, post_validation_error
+from app.utils import new_record_key, normalize_handle, normalize_text, post_validation_error
 
 DISCOVER_FEED_URI = "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot"
 PUBLIC_SERVICE = "https://public.api.bsky.app"
@@ -139,6 +140,8 @@ class BlueskyGateway:
         self._client_factory = client_factory
         self._client: Client | None = None
         self._profile: Profile | None = None
+        self._recent_posts_cache: list[dict] | None = None
+        self._recent_posts_time: float = 0.0
         self._lock = threading.RLock()
 
     @property
@@ -330,6 +333,33 @@ class BlueskyGateway:
             return self._with_reauth(action)
         except Exception:
             return None
+
+    def check_recent_post(self, text: str) -> PublishResult | None:
+        """Check if this post content already exists on the author's Bluesky profile."""
+        clean = normalize_text(text)
+        if not clean or not self.handle:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            if self._recent_posts_cache is None or (now - self._recent_posts_time) > 60.0:
+                try:
+                    feed_items, _ = self.fetch_author_feed(self.handle, limit=50)
+                    self._recent_posts_cache = feed_items
+                    self._recent_posts_time = now
+                except Exception:
+                    return None
+            cached = self._recent_posts_cache or []
+        for item in cached:
+            post = item.get("post") or {}
+            record = post.get("record") or {}
+            post_text = normalize_text(_field(record, "text", ""))
+            if post_text and post_text == clean:
+                return PublishResult(
+                    uri=str(_field(post, "uri", "")),
+                    cid=str(_field(post, "cid", "")),
+                    recovered_existing=True,
+                )
+        return None
 
     def publish_text(self, text: str, record_key: str | None = None) -> PublishResult:
         clean_text = text.strip()

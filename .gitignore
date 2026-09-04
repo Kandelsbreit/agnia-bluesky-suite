@@ -15,3 +15,6 @@ release/
 *.log
 .idea/
 .vscode/
+data/
+.secret_key
+

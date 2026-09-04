@@ -14,15 +14,73 @@ def resource_path(relative: str) -> Path:
     return base / relative
 
 
+def app_dir() -> Path:
+    """Directory containing the executable or main script."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _is_dir_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / f".writable_test_{os.getpid()}"
+        test_file.write_text("ok", encoding="ascii")
+        test_file.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _legacy_system_data_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_DIR_NAME
+    return Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_DIR_NAME
+
+
+def _migrate_legacy_db_if_needed(target_dir: Path) -> None:
+    target_db = target_dir / "agnia_bluesky.db"
+    if target_db.exists():
+        return
+    legacy_dir = _legacy_system_data_dir()
+    legacy_db = legacy_dir / "agnia_bluesky.db"
+    if not legacy_db.exists():
+        return
+    try:
+        if legacy_dir.resolve() == target_dir.resolve():
+            return
+    except OSError:
+        pass
+    try:
+        import shutil
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_db, target_db)
+        for ext in ("-wal", "-shm"):
+            extra = legacy_dir / f"agnia_bluesky.db{ext}"
+            if extra.exists():
+                shutil.copy2(extra, target_dir / f"agnia_bluesky.db{ext}")
+    except OSError:
+        pass
+
+
 def data_dir() -> Path:
     override = os.getenv(DATA_DIR_ENV)
     if override:
         root = Path(override).expanduser().resolve()
-    elif sys.platform == "win32":
-        root = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_DIR_NAME
     else:
-        root = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_DIR_NAME
+        exe_folder = app_dir()
+        if (exe_folder / "agnia_bluesky.db").exists():
+            root = exe_folder
+        else:
+            portable_data = exe_folder / "data"
+            if _is_dir_writable(portable_data):
+                root = portable_data
+            else:
+                root = _legacy_system_data_dir()
+
     root.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_db_if_needed(root)
     return root
 
 
@@ -40,4 +98,5 @@ def exports_dir() -> Path:
     result = data_dir() / "exports"
     result.mkdir(parents=True, exist_ok=True)
     return result
+
 

@@ -47,6 +47,8 @@ class Database:
         self._lock = threading.RLock()
         self._init_schema()
         self._heal_legacy_queue_keys()
+        self._migrate_secrets_to_portable()
+        self._prune_queue_already_in_history()
 
     @contextmanager
     def _connection(self):
@@ -185,6 +187,58 @@ class Database:
             )
         return updated
 
+    def _migrate_secrets_to_portable(self) -> int:
+        """Migrate DPAPI secrets to portable-v2 format so they work across computers."""
+        migrated = 0
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, handle, password_cipher FROM accounts WHERE password_cipher LIKE 'dpapi:%'"
+            ).fetchall()
+        if not rows:
+            return 0
+        with self._write() as connection:
+            for row in rows:
+                try:
+                    plaintext = unprotect_secret(row["password_cipher"])
+                    if plaintext:
+                        new_cipher = protect_secret(plaintext)
+                        connection.execute(
+                            "UPDATE accounts SET password_cipher=? WHERE id=?",
+                            (new_cipher, row["id"]),
+                        )
+                        migrated += 1
+                        get_logger().info(
+                            "[@%s] Пароль аккаунта переведён в переносимый формат для работы на любых ПК",
+                            row["handle"],
+                        )
+                except Exception as exc:
+                    get_logger().warning(
+                        "[@%s] Не удалось перевести старый пароль DPAPI в переносимый формат: %s",
+                        row["handle"],
+                        exc,
+                    )
+        return migrated
+
+    def _prune_queue_already_in_history(self) -> int:
+        """Remove any queue items that have already been published and exist in post_history."""
+        with self._write() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM queue WHERE id IN (
+                    SELECT q.id FROM queue q
+                    JOIN post_history h ON q.account_id = h.account_id AND q.content_hash = h.content_hash
+                )
+                """
+            )
+            count = cursor.rowcount
+            if count > 0:
+                get_logger().info(
+                    "Удалено %d постов из очереди, которые уже были ранее опубликованы (защита от дублирования)",
+                    count,
+                )
+            return count
+
+
     # Settings
     def get_setting(self, key: str, default: str | None = None) -> str:
         fallback = DEFAULT_SETTINGS.get(key, "") if default is None else str(default)
@@ -257,7 +311,15 @@ class Database:
         if not cipher:
             return item, ""
         try:
-            return item, unprotect_secret(cipher)
+            secret = unprotect_secret(cipher)
+            if cipher.startswith("dpapi:") and secret:
+                try:
+                    new_cipher = protect_secret(secret)
+                    with self._write() as conn:
+                        conn.execute("UPDATE accounts SET password_cipher=? WHERE id=?", (new_cipher, account_id))
+                except Exception:
+                    pass
+            return item, secret
         except SecretError as exc:
             get_logger().error("Не удалось расшифровать App Password для @%s: %s", item["handle"], exc)
             item["secret_error"] = str(exc)
@@ -436,6 +498,16 @@ class Database:
                 (account_id, digest, account_id, digest),
             ).fetchone()
             return row is not None
+
+    def post_exists_in_history(self, account_id: int, text: str) -> dict[str, Any] | None:
+        digest = content_hash(text.strip())
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM post_history WHERE account_id=? AND content_hash=?",
+                (account_id, digest),
+            ).fetchone()
+            return dict(row) if row else None
+
 
     def enqueue_many(self, items: Iterable[dict[str, str]]) -> tuple[int, int]:
         prepared = list(items)
