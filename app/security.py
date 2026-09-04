@@ -150,7 +150,7 @@ def _encrypt_portable_v2(data: bytes, master_key: bytes | None = None) -> bytes:
     enc_key = derived[:32]
     mac_key = derived[32:]
     stream = _keystream(enc_key, iv, len(data))
-    ciphertext = bytes(a ^ b for a, b in zip(data, stream))
+    ciphertext = bytes(a ^ b for a, b in zip(data, stream, strict=True))
     tag = hmac.new(mac_key, salt + iv + ciphertext, hashlib.sha256).digest()
     return salt + iv + tag + ciphertext
 
@@ -171,7 +171,7 @@ def _decrypt_portable_v2(payload: bytes, master_key: bytes | None = None) -> byt
     if not hmac.compare_digest(tag, expected_tag):
         raise SecretError("Portable secret authentication failed")
     stream = _keystream(enc_key, iv, len(ciphertext))
-    return bytes(a ^ b for a, b in zip(ciphertext, stream))
+    return bytes(a ^ b for a, b in zip(ciphertext, stream, strict=True))
 
 
 def protect_secret(secret: str) -> str:
