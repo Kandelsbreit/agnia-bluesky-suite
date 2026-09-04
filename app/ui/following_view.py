@@ -105,7 +105,7 @@ class FollowingView(ctk.CTkFrame):
         except OSError as exc:
             self._append(f"Ошибка чтения: {exc}")
 
-    def _options(self) -> AutomationOptions:
+    def _automation_options(self) -> AutomationOptions:
         try:
             limit = max(1, int(self.limit_entry.get()))
         except ValueError:
@@ -132,7 +132,7 @@ class FollowingView(ctk.CTkFrame):
         if not targets:
             self._append("Список целей пуст.")
             return
-        options = self._options()
+        options = self._automation_options()
         self.db.set_setting("follow_limit", options.limit)
         self.progress.set(0)
         self.worker = AutomationWorker(

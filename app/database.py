@@ -557,6 +557,7 @@ class Database:
         status: str = "published",
         *,
         snapshot: dict[str, Any] | None = None,
+        next_scheduled_at: str | None = None,
     ) -> bool:
         if status not in {"published", "skipped"}:
             raise ValueError("Unknown queue completion status")
@@ -565,9 +566,16 @@ class Database:
             row: sqlite3.Row | dict[str, Any] | None = stored or snapshot
             if not row:
                 return False
+            completed_at = utcnow_iso()
             values = (
-                row["account_id"], row["content"], row["content_hash"], row["record_key"],
-                status, uri, cid, utcnow_iso(),
+                row["account_id"],
+                row["content"],
+                row["content_hash"],
+                row["record_key"],
+                status,
+                uri,
+                cid,
+                completed_at,
             )
             if status == "published":
                 connection.execute(
@@ -590,6 +598,14 @@ class Database:
                     "DELETE FROM queue WHERE id=? OR (account_id=? AND content_hash=?)",
                     (queue_id, row["account_id"], row["content_hash"]),
                 )
+                if next_scheduled_at is not None:
+                    connection.execute(
+                        """
+                        UPDATE accounts SET last_posted_at=?,next_scheduled_at=?,
+                            retry_count=0,last_error='',updated_at=? WHERE id=?
+                        """,
+                        (completed_at, next_scheduled_at, completed_at, row["account_id"]),
+                    )
             else:
                 connection.execute(
                     """
@@ -601,6 +617,37 @@ class Database:
                 )
                 connection.execute("DELETE FROM queue WHERE id=?", (queue_id,))
             return True
+
+    def record_published_post(
+        self,
+        account_id: int,
+        content: str,
+        record_key: str,
+        uri: str,
+        cid: str,
+    ) -> None:
+        """Add a manual publication to the same deduplication history as queue posts."""
+        normalized = content.strip()
+        digest = content_hash(normalized)
+        with self._write() as connection:
+            connection.execute(
+                """
+                INSERT INTO post_history(
+                    account_id,content,content_hash,record_key,status,post_uri,post_cid,completed_at
+                ) VALUES(?,?,?,?, 'published',?,?,?)
+                ON CONFLICT(account_id,content_hash) DO UPDATE SET
+                    record_key=excluded.record_key,
+                    status='published',
+                    post_uri=excluded.post_uri,
+                    post_cid=excluded.post_cid,
+                    completed_at=excluded.completed_at
+                """,
+                (account_id, normalized, digest, record_key, uri, cid, utcnow_iso()),
+            )
+            connection.execute(
+                "DELETE FROM queue WHERE account_id=? AND content_hash=?",
+                (account_id, digest),
+            )
 
     def get_history(self, account_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock, self._connection() as connection:

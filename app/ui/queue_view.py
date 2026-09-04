@@ -236,6 +236,7 @@ class QueueView(ctk.CTkFrame):
             "Пропустить", "Убрать верхний пост без публикации и записать как пропущенный?", parent=self
         ):
             self.db.complete_queue_item(self.cached_next_id, "", "", "skipped")
+            self.db.update_runtime(self.account_id, next_scheduled_at=None, retry_count=0, last_error="")
             self.scheduler.wake(self.account_id)
             self.refresh()
 
@@ -245,7 +246,10 @@ class QueueView(ctk.CTkFrame):
 
     def delete_item(self, queue_id: int) -> None:
         if self.account_id:
+            was_next = queue_id == self.cached_next_id
             self.db.delete_queue_item(queue_id)
+            if was_next:
+                self.db.update_runtime(self.account_id, next_scheduled_at=None, retry_count=0, last_error="")
             self.scheduler.wake(self.account_id)
             self.refresh()
 
@@ -287,4 +291,3 @@ class QueueView(ctk.CTkFrame):
             self.db.get_import_errors(),
             lambda row: f"{row['file_name']} · @{row['account_handle']} · {row['error_reason']}\n{row['raw_content']}",
         )
-

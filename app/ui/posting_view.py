@@ -86,6 +86,7 @@ class PostingView(ctk.CTkFrame):
         self.busy = True
         self.publish_button.configure(state="disabled")
         self.status.configure(text="Публикация...")
+        record_key = new_record_key()
 
         def work() -> None:
             try:
@@ -93,7 +94,8 @@ class PostingView(ctk.CTkFrame):
                 if not account or not password:
                     raise BlueskyError("У аккаунта нет сохранённого App Password", auth_error=True)
                 gateway = BlueskyGateway(account["handle"], password)
-                result = gateway.publish_text(text, new_record_key())
+                result = gateway.publish_text(text, record_key)
+                self.db.record_published_post(account_id, text, record_key, result.uri, result.cid)
                 self.db.record_activity(
                     account_id,
                     "manual_post",
@@ -140,4 +142,3 @@ class PostingView(ctk.CTkFrame):
         self._update_counter()
         if not keep_status:
             self.status.configure(text="Готово", text_color=("gray20", "gray90"))
-

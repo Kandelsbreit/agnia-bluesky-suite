@@ -46,6 +46,10 @@ def test_first_queue_item_waits_for_interval_until_publish_now(db):
         history = db.get_history(account)
         assert history[0]["record_key"] == record_key
         assert history[0]["status"] == "published"
+        runtime = db.get_account(account)
+        assert runtime["last_posted_at"]
+        assert runtime["next_scheduled_at"]
+        assert runtime["retry_count"] == 0
         assert queued is not None
     finally:
         worker.stop()
@@ -106,4 +110,3 @@ def test_missing_password_is_reported_without_losing_post(db):
         assert db.queue_count(account) == 1
     finally:
         worker.stop()
-

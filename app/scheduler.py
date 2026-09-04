@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from app.bluesky import BlueskyError, BlueskyGateway
 from app.database import Database
 from app.logging_setup import get_logger
-from app.utils import parse_iso, utcnow_iso
+from app.utils import parse_iso
 
 BACKOFF_SECONDS = [60, 120, 300, 600, 1200, 1800]
 
@@ -133,17 +133,15 @@ class AccountQueueWorker:
                 self._set_status("Публикация")
                 gateway = self._gateway_for(account["handle"], password)
                 result = gateway.publish_text(item["content"], item["record_key"])
-                self.db.complete_queue_item(item["id"], result.uri, result.cid, snapshot=item)
-                completed_at = utcnow_iso()
                 fresh_account = self.db.get_account(self.account_id) or account
                 next_interval = self.calculate_interval(fresh_account)
                 next_time = datetime.now(UTC) + timedelta(seconds=next_interval)
-                self.db.update_runtime(
-                    self.account_id,
-                    last_posted_at=completed_at,
+                self.db.complete_queue_item(
+                    item["id"],
+                    result.uri,
+                    result.cid,
+                    snapshot=item,
                     next_scheduled_at=next_time.isoformat(),
-                    retry_count=0,
-                    last_error="",
                 )
                 self.db.update_connection(
                     self.account_id,

@@ -97,6 +97,23 @@ def test_confirmed_publish_wins_over_concurrent_delete_or_skip(db):
     assert db.queue_count(account) == 0
 
 
+def test_manual_publish_enters_dedup_history_and_removes_matching_queue(db):
+    account = db.save_account("manual.test")
+    db.enqueue_one(account, "same manual text")
+    db.record_published_post(
+        account,
+        "same manual text",
+        "manual-key",
+        "at://manual",
+        "manual-cid",
+    )
+    assert db.queue_count(account) == 0
+    assert db.enqueue_one(account, "same manual text") is None
+    history = db.get_history(account)
+    assert history[0]["record_key"] == "manual-key"
+    assert history[0]["status"] == "published"
+
+
 def test_runtime_and_settings_survive_reopen(db):
     account = db.save_account("persist.test")
     db.enqueue_one(account, "persistent")

@@ -110,6 +110,9 @@ class SettingsView(ctk.CTkFrame):
         buttons = ctk.CTkFrame(journal, fg_color="transparent")
         buttons.grid(row=0, column=1, sticky="e", padx=10, pady=(8, 2))
         ctk.CTkButton(buttons, text="Обновить", width=82, command=self.refresh_log).pack(side="left", padx=3)
+        ctk.CTkButton(buttons, text="История действий", width=120, command=self.show_activity).pack(
+            side="left", padx=3
+        )
         ctk.CTkButton(buttons, text="Файл журнала", width=105, fg_color=BLUE, command=self.open_log).pack(side="left", padx=3)
         ctk.CTkButton(buttons, text="Папка данных", width=105, command=lambda: autostart.open_folder(data_dir())).pack(
             side="left", padx=3
@@ -213,3 +216,21 @@ class SettingsView(ctk.CTkFrame):
                 autostart.open_folder(LOG_FILE.parent)
         except OSError as exc:
             messagebox.showerror("Журнал", str(exc), parent=self)
+
+    def show_activity(self) -> None:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("История действий Bluesky")
+        dialog.geometry("850x560")
+        dialog.transient(self.winfo_toplevel())
+        box = ctk.CTkTextbox(dialog, wrap="word", font=ctk.CTkFont(family="Consolas", size=11))
+        box.pack(fill="both", expand=True, padx=12, pady=12)
+        blocks = []
+        for row in self.db.get_activity(500):
+            account = f"@{row['account_handle']}" if row.get("account_handle") else "система"
+            target = row.get("target_handle") or row.get("target_key") or ""
+            blocks.append(
+                f"{row['created_at']} · {account} · {row['action_type']} · {row['status']}\n"
+                f"{target}\n{row.get('message') or ''}".strip()
+            )
+        box.insert("1.0", "\n\n".join(blocks) or "История пока пуста.")
+        box.configure(state="disabled")

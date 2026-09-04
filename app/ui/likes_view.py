@@ -98,7 +98,7 @@ class LikesView(ctk.CTkFrame):
         self.log_box.insert("end", text + "\n")
         self.log_box.see("end")
 
-    def _options(self) -> AutomationOptions:
+    def _automation_options(self) -> AutomationOptions:
         try:
             limit = max(1, int(self.limit_entry.get()))
         except ValueError:
@@ -124,7 +124,7 @@ class LikesView(ctk.CTkFrame):
         if self.source.get() == "search" and not self.query_entry.get().strip():
             self._append("Для режима «Поиск» нужен запрос.")
             return
-        options = self._options()
+        options = self._automation_options()
         auto_enabled = bool(self.auto_start.get())
         self.db.set_settings(
             {
