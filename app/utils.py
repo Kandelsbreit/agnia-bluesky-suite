@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
+import time
 import unicodedata
 import uuid
 from datetime import UTC, datetime
@@ -73,9 +75,24 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
+TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
+_TID_SET = set(TID_ALPHABET)
+
+
+def is_valid_tid(key: str | None) -> bool:
+    """Check if a string conforms to the 13-character AT Protocol TID format."""
+    if not key or len(key) != 13:
+        return False
+    return all(c in _TID_SET for c in key)
+
+
 def new_record_key() -> str:
-    """Stable AT Protocol record key stored before a publication attempt."""
-    return uuid.uuid4().hex
+    """Canonical 13-character AT Protocol TID record key."""
+    micros = int(time.time() * 1_000_000) & 0x1FFFFFFFFFFFFF
+    clock_id = random.randint(0, 1023) & 0x3FF
+    val = (micros << 10) | clock_id
+    chars = [TID_ALPHABET[(val >> (5 * (12 - i))) & 0x1F] for i in range(13)]
+    return "".join(chars)
 
 
 def format_duration(seconds: float) -> str:

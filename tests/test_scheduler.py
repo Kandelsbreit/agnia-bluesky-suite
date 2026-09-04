@@ -120,18 +120,22 @@ class PermanentFailureGateway(SuccessfulGateway):
         raise BlueskyError("invalid record", retryable=False)
 
 
-def test_permanent_api_error_pauses_queue_and_retains_item(db):
+def test_non_retryable_api_error_skips_post_and_continues_queue(db):
     PermanentFailureGateway.calls = []
-    account = db.save_account("invalid.test", "password")
+    account = db.save_account("invalid.test", "password", interval_minutes=60, jitter_minutes=0)
     db.enqueue_one(account, "Keep invalid item")
     worker = AccountQueueWorker(account, db, gateway_factory=PermanentFailureGateway)
     worker.start()
     try:
         worker.publish_now()
-        assert wait_until(lambda: bool(db.get_account(account)["queue_paused"]))
-        assert db.queue_count(account) == 1
-        assert db.next_queue_item(account)["attempt_count"] == 1
-        assert db.get_account(account)["next_scheduled_at"] is None
-        assert "invalid record" in db.get_account(account)["last_error"]
+        assert wait_until(lambda: db.queue_count(account) == 0)
+        history = db.get_history(account)
+        assert len(history) == 1
+        assert history[0]["status"] == "skipped"
+        acc = db.get_account(account)
+        assert not bool(acc["queue_paused"])
+        assert acc["next_scheduled_at"] is not None
+        assert "invalid record" in acc["last_error"]
     finally:
         worker.stop()
+

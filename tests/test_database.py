@@ -152,3 +152,24 @@ def test_activity_history_is_scoped_by_account(db):
     db.record_activity(first, "like", "success", target_key="at://post/1")
     assert db.action_was_successful(first, "like", "at://post/1")
     assert not db.action_was_successful(second, "like", "at://post/1")
+
+
+def test_heal_legacy_queue_keys_converts_uuids_and_unpauses(db):
+    account = db.save_account("heal.test")
+    with db._write() as conn:
+        conn.execute(
+            "INSERT INTO queue (account_id, position, record_key, content, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (account, 1, "08c529508337455f930c3af8219561dd", "legacy post", "hash123", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "UPDATE accounts SET queue_paused = 1, last_error = 'Invalid TID string' WHERE id = ?",
+            (account,),
+        )
+    reopened = type(db)(db.path)
+    item = reopened.next_queue_item(account)
+    assert item is not None
+    assert len(item["record_key"]) == 13
+    assert item["record_key"] != "08c529508337455f930c3af8219561dd"
+    acc = reopened.get_account(account)
+    assert acc["queue_paused"] == 0
+

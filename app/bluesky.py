@@ -12,7 +12,7 @@ from atproto_client.exceptions import (
     UnauthorizedError,
 )
 
-from app.utils import normalize_handle, post_validation_error
+from app.utils import is_valid_tid, new_record_key, normalize_handle, post_validation_error
 
 DISCOVER_FEED_URI = "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot"
 PUBLIC_SERVICE = "https://public.api.bsky.app"
@@ -331,11 +331,13 @@ class BlueskyGateway:
         except Exception:
             return None
 
-    def publish_text(self, text: str, record_key: str) -> PublishResult:
+    def publish_text(self, text: str, record_key: str | None = None) -> PublishResult:
         clean_text = text.strip()
         validation_error = post_validation_error(clean_text)
         if validation_error:
             raise BlueskyError(validation_error)
+
+        valid_key = record_key if is_valid_tid(record_key) else new_record_key()
 
         def action(client: Client) -> PublishResult:
             assert self._profile is not None
@@ -343,11 +345,18 @@ class BlueskyGateway:
                 text=clean_text,
                 created_at=client.get_current_time_iso(),
             )
-            response = client.app.bsky.feed.post.create(
-                self._profile.did,
-                record,
-                rkey=record_key,
-            )
+            try:
+                response = client.app.bsky.feed.post.create(
+                    self._profile.did,
+                    record,
+                    rkey=valid_key,
+                )
+            except Exception as inner_exc:
+                inner_msg = str(inner_exc).lower()
+                if "invalid tid" in inner_msg or "invalid record key" in inner_msg:
+                    response = client.send_post(text=clean_text)
+                else:
+                    raise
             return PublishResult(uri=str(response.uri), cid=str(response.cid))
 
         try:
@@ -360,7 +369,7 @@ class BlueskyGateway:
                 or exc.retryable
             )
             if might_exist:
-                recovered = self._verify_record(record_key, clean_text)
+                recovered = self._verify_record(valid_key, clean_text)
                 if recovered:
                     return recovered
             raise
@@ -374,7 +383,7 @@ class BlueskyGateway:
                 or details.retryable
             )
             if might_exist:
-                recovered = self._verify_record(record_key, clean_text)
+                recovered = self._verify_record(valid_key, clean_text)
                 if recovered:
                     return recovered
             raise details from exc

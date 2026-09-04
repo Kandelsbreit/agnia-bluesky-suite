@@ -46,6 +46,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._init_schema()
+        self._heal_legacy_queue_keys()
 
     @contextmanager
     def _connection(self):
@@ -161,6 +162,28 @@ class Database:
                 DEFAULT_SETTINGS.items(),
             )
             connection.execute("PRAGMA user_version=1")
+
+    def _heal_legacy_queue_keys(self) -> int:
+        """Upgrade any non-TID (e.g. 32-char UUID hex) keys to canonical 13-char TIDs."""
+        updated = 0
+        with self._write() as connection:
+            rows = connection.execute(
+                "SELECT id, record_key FROM queue WHERE length(record_key) != 13"
+            ).fetchall()
+            if rows:
+                updates = [(new_record_key(), row["id"]) for row in rows]
+                connection.executemany(
+                    "UPDATE queue SET record_key=? WHERE id=?",
+                    updates,
+                )
+                updated = len(updates)
+            connection.execute(
+                """
+                UPDATE accounts SET queue_paused=0, last_error=''
+                WHERE last_error LIKE '%Invalid TID string%'
+                """
+            )
+        return updated
 
     # Settings
     def get_setting(self, key: str, default: str | None = None) -> str:
@@ -573,6 +596,10 @@ class Database:
                 (utcnow_iso(), error[:1000], queue_id),
             )
 
+    def update_queue_record_key(self, queue_id: int, record_key: str) -> None:
+        with self._write() as connection:
+            connection.execute("UPDATE queue SET record_key=? WHERE id=?", (record_key, queue_id))
+
     def complete_queue_item(
         self,
         queue_id: int,
@@ -591,11 +618,16 @@ class Database:
             if not row:
                 return False
             completed_at = utcnow_iso()
+            rkey = row["record_key"]
+            if uri:
+                uri_key = uri.rstrip("/").split("/")[-1]
+                if uri_key and uri_key != rkey:
+                    rkey = uri_key
             values = (
                 row["account_id"],
                 row["content"],
                 row["content_hash"],
-                row["record_key"],
+                rkey,
                 status,
                 uri,
                 cid,

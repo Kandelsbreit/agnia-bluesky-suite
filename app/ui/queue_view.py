@@ -66,6 +66,8 @@ class QueueView(ctk.CTkFrame):
         self.now_button.pack(side="left", padx=(0, 6))
         self.pause_button = ctk.CTkButton(buttons, text="Пауза", fg_color=AMBER, command=self.toggle_pause)
         self.pause_button.pack(side="left", padx=6)
+        self.unpause_all_btn = ctk.CTkButton(buttons, text="Запустить все очереди", fg_color=BLUE, command=self.unpause_all)
+        self.unpause_all_btn.pack(side="left", padx=6)
         self.skip_button = ctk.CTkButton(buttons, text="Пропустить", width=105, command=self.skip_next)
         self.skip_button.pack(side="left", padx=6)
         self.delete_next_button = ctk.CTkButton(buttons, text="Удалить", width=90, fg_color=RED, command=self.delete_next)
@@ -122,7 +124,8 @@ class QueueView(ctk.CTkFrame):
         self.page_label.configure(text=f"Страница {self.page + 1}/{total_pages}")
         self.prev_button.configure(state="normal" if self.page else "disabled")
         self.next_button.configure(state="normal" if self.page + 1 < total_pages else "disabled")
-        self.count_label.configure(text=f"Очередь @{account['handle']}: {count}")
+        total_all = self.db.stats().get("queued", 0)
+        self.count_label.configure(text=f"Очередь @{account['handle']}: {count} (всего в очередях: {total_all})")
         self.pause_button.configure(text="Продолжить" if account.get("queue_paused") else "Пауза")
 
         next_item = self.db.next_queue_item(account_id)
@@ -246,6 +249,13 @@ class QueueView(ctk.CTkFrame):
         if self.account_id:
             paused = self.scheduler.toggle_pause(self.account_id)
             self.pause_button.configure(text="Продолжить" if paused else "Пауза")
+
+    def unpause_all(self) -> None:
+        count = self.db.unpause_all_queues()
+        self.scheduler.wake_all()
+        self.on_accounts_changed()
+        self.refresh()
+        messagebox.showinfo("Очереди", f"Все очереди запущены (снято с паузы: {count}).", parent=self)
 
     def skip_next(self) -> None:
         if self.account_id and self.cached_next_id and messagebox.askyesno(

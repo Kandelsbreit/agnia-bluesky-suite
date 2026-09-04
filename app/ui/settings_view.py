@@ -8,7 +8,7 @@ import customtkinter as ctk
 
 from app import autostart
 from app.database import Database
-from app.logging_setup import LOG_FILE, read_log_tail
+from app.logging_setup import LOG_FILE, clear_log_file, read_log_tail
 from app.paths import data_dir, exports_dir
 from app.ui.common import BLUE, GREEN, MUTED
 
@@ -110,6 +110,7 @@ class SettingsView(ctk.CTkFrame):
         buttons = ctk.CTkFrame(journal, fg_color="transparent")
         buttons.grid(row=0, column=1, sticky="e", padx=10, pady=(8, 2))
         ctk.CTkButton(buttons, text="Обновить", width=82, command=self.refresh_log).pack(side="left", padx=3)
+        ctk.CTkButton(buttons, text="Очистить", width=82, command=self.clear_log).pack(side="left", padx=3)
         ctk.CTkButton(buttons, text="История действий", width=120, command=self.show_activity).pack(
             side="left", padx=3
         )
@@ -205,6 +206,12 @@ class SettingsView(ctk.CTkFrame):
         self.log_box.delete("1.0", "end")
         self.log_box.insert("1.0", content or "Журнал пока пуст.")
         self.log_box.see("end")
+
+    def clear_log(self) -> None:
+        clear_log_file()
+        self.log_box.delete("1.0", "end")
+        self.log_box.insert("1.0", "Журнал очищен.")
+
 
     def open_log(self) -> None:
         try:

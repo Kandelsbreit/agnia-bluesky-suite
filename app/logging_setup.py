@@ -60,3 +60,13 @@ def read_log_tail(max_lines: int = 300) -> str:
     except OSError:
         return ""
 
+
+def clear_log_file() -> None:
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "w", encoding="utf-8") as fh:
+            fh.truncate(0)
+    except OSError:
+        pass
+
+

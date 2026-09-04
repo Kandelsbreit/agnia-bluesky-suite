@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from app.bluesky import BlueskyError, BlueskyGateway
 from app.database import Database
 from app.logging_setup import get_logger
-from app.utils import parse_iso
+from app.utils import is_valid_tid, new_record_key, parse_iso
 
 BACKOFF_SECONDS = [60, 120, 300, 600, 1200, 1800]
 
@@ -136,7 +136,11 @@ class AccountQueueWorker:
                 self._wake.clear()
                 self._set_status("Публикация")
                 gateway = self._gateway_for(account["handle"], password)
-                result = gateway.publish_text(item["content"], item["record_key"])
+                rkey = item.get("record_key") or ""
+                if not is_valid_tid(rkey):
+                    rkey = new_record_key()
+                    self.db.update_queue_record_key(item["id"], rkey)
+                result = gateway.publish_text(item["content"], rkey)
                 fresh_account = self.db.get_account(self.account_id) or account
                 next_interval = self.calculate_interval(fresh_account)
                 next_time = datetime.now(UTC) + timedelta(seconds=next_interval)
@@ -165,29 +169,33 @@ class AccountQueueWorker:
                 self._set_status("Опубликовано")
                 self._wait(0.2)
             except BlueskyError as exc:
-                item = self.db.next_queue_item(self.account_id)
-                if item:
-                    self.db.mark_attempt_failed(item["id"], str(exc))
                 account = self.db.get_account(self.account_id) or {}
                 retry_count = int(account.get("retry_count") or 0) + 1
                 if not exc.retryable and not exc.auth_error:
                     self._publish_now.clear()
-                    self.db.set_queue_paused(self.account_id, True)
+                    bad_item = self.db.next_queue_item(self.account_id)
+                    if bad_item:
+                        self.db.finish_queue_item(bad_item["id"], "skipped", uri="", cid="")
+                        get_logger().warning(
+                            "[@%s] Пост #%s пропущен из-за ошибки: %s. Очередь продолжается.",
+                            account.get("handle", self.account_id), bad_item["id"], exc,
+                        )
+                        self.db.record_activity(
+                            self.account_id,
+                            "queue_post",
+                            "skipped",
+                            message=f"Пост пропущен: {exc}",
+                        )
+                    interval = self.calculate_interval(account)
+                    next_time = datetime.now(UTC) + timedelta(seconds=interval)
                     self.db.update_runtime(
                         self.account_id,
-                        next_scheduled_at=None,
-                        retry_count=retry_count,
-                        last_error=str(exc)[:1000],
+                        next_scheduled_at=next_time.isoformat(),
+                        retry_count=0,
+                        last_error=f"Пропущен пост: {exc}"[:1000],
                     )
-                    self.db.record_activity(
-                        self.account_id,
-                        "queue_post",
-                        "error",
-                        message=f"{exc}; очередь поставлена на паузу",
-                    )
-                    get_logger().error("Неповторяемая ошибка очереди аккаунта %s: %s", self.account_id, exc)
-                    self._set_status("Ошибка: очередь на паузе")
-                    self._wait(1)
+                    self._set_status("Пост пропущен (ошибка)")
+                    self._wait(2)
                     continue
                 step = BACKOFF_SECONDS[min(retry_count - 1, len(BACKOFF_SECONDS) - 1)]
                 if exc.auth_error:

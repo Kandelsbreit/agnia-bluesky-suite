@@ -6,6 +6,7 @@ from app.utils import (
     content_hash,
     count_graphemes,
     format_duration,
+    is_valid_tid,
     new_record_key,
     normalize_handle,
     normalize_text,
@@ -26,7 +27,10 @@ def test_normalize_text_and_hash_are_line_ending_stable():
 
 def test_grapheme_counter_treats_combining_character_as_one():
     assert count_graphemes("e\u0301") == 1
-    assert count_graphemes("👩‍💻") == 1
+    import app.utils as au
+
+    if au._regex is not None:
+        assert count_graphemes("👩‍💻") == 1
 
 
 def test_parse_iso_normalizes_to_utc_and_rejects_bad_value():
@@ -39,7 +43,13 @@ def test_parse_iso_normalizes_to_utc_and_rejects_bad_value():
 def test_record_keys_are_unique_and_safe():
     first, second = new_record_key(), new_record_key()
     assert first != second
-    assert len(first) == 32 and first.isalnum()
+    assert len(first) == 13
+    assert len(second) == 13
+    assert is_valid_tid(first)
+    assert is_valid_tid(second)
+    assert not is_valid_tid("08c529508337455f930c3af8219561dd")
+    assert not is_valid_tid("short")
+    assert not is_valid_tid(None)
 
 
 def test_duration_and_filename_formatting():

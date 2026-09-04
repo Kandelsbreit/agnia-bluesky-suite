@@ -272,7 +272,14 @@ class AutomationWorker(threading.Thread):
                         self._emit("log", level="error", message=f"[@{gateway.handle}] Не удалось лайкнуть @{author_handle}: {exc}")
                         if exc.auth_error:
                             return
-                        if not self._wait(exc.retry_after or 3):
+                        wait_time = exc.retry_after or 3
+                        if wait_time >= 5:
+                            self._emit(
+                                "log",
+                                level="warning",
+                                message=f"[@{gateway.handle}] Пауза из-за ограничения частоты запросов: {int(wait_time)} сек.",
+                            )
+                        if not self._wait(wait_time):
                             return
 
                 if not next_cursor or next_cursor == cursor:
