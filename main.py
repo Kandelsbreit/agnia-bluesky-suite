@@ -27,7 +27,6 @@ def _run_smoke() -> int:
             from app.smoke import run_smoke_test
 
             run_smoke_test()
-            progress.unlink(missing_ok=True)
             return 0
         except Exception:
             import traceback
@@ -73,4 +72,12 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    raise SystemExit(main())
+    exit_code = main()
+    # A frozen windowed Tcl/Tk process can keep interpreter-shutdown hooks alive
+    # even after the smoke window has been destroyed.  The smoke routine writes
+    # its final checkpoint only after every assertion has passed, so terminate
+    # explicitly once that checkpoint exists.  Normal application shutdown is
+    # unaffected.
+    if "--smoke-test" in sys.argv:
+        os._exit(exit_code)
+    raise SystemExit(exit_code)
