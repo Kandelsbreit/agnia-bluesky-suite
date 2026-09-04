@@ -126,9 +126,9 @@ class LikesView(ctk.CTkFrame):
 
     def _account_mode_toggled(self) -> None:
         if bool(self.all_accounts_cb.get()):
-            self.selector.menu.configure(state="disabled")
+            self.selector.set_state("disabled")
         else:
-            self.selector.menu.configure(state="normal")
+            self.selector.set_state("normal")
 
     def _source_changed(self, label: str) -> None:
         self.source.set({"Домашняя лента": "timeline", "Рекомендации": "discover", "Поиск": "search"}[label])

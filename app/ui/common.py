@@ -43,6 +43,13 @@ class AccountSelector(ctk.CTkFrame):
     def account_id(self) -> int | None:
         return self._selected_id
 
+    @property
+    def menu(self) -> ctk.CTkComboBox:
+        return self.combo
+
+    def set_state(self, state: str) -> None:
+        self.combo.configure(state=state)
+
     def refresh(self, preferred_id: int | None = None) -> None:
         accounts = self.db.get_accounts()
         self._labels = {f"@{item['handle']}": int(item["id"]) for item in accounts}
