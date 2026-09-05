@@ -45,9 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     if options.smoke_test:
         return _run_smoke()
 
-    from app.backup import apply_staged_restore
-    from app.instance import InstanceLock
-
     instance = None
     logger = None
     try:
@@ -76,8 +73,6 @@ def main(argv: list[str] | None = None) -> int:
             logger.exception("Не удалось создать автоматическую резервную копию")
         hidden = bool(options.tray or db.get_bool("start_minimized"))
         window = MainWindow(db, start_hidden=hidden)
-        window.mainloop()
-        return 0
     except Exception as exc:
         if logger:
             logger.exception("Критическая ошибка запуска: %s", exc)
@@ -87,7 +82,19 @@ def main(argv: list[str] | None = None) -> int:
             messagebox.showerror("Agnia Bluesky Suite", f"Программа не смогла запуститься: {exc}")
         except Exception:
             pass
+        if instance:
+            instance.release()
         return 1
+
+    try:
+        window.mainloop()
+        return 0
+    except Exception as exc:
+        if "application has been destroyed" in str(exc).lower():
+            return 0
+        if logger:
+            logger.exception("Ошибка главного цикла интерфейса: %s", exc)
+        return 0
     finally:
         if instance:
             instance.release()

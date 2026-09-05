@@ -133,15 +133,12 @@ def run():
             root.show_view("settings")
             pump()
             screenshot("settings")
+            # Verify clean quit without destroyed-application callback errors
+            root._finish_quit()
             assert not errors, errors
             assert not showerror.called, showerror.call_args_list
-        root._maintenance_stop.set()
-        from app.logging_setup import set_ui_callback
-
-        set_ui_callback(None)
-        root.destroy()
         print(
-            "GUI smoke passed: all 7 tabs, drafts, media preview, queue editor, search, skip, calendar, history, settings; no live API calls."
+            "GUI smoke passed: all 7 tabs, drafts, media preview, queue editor, search, skip, calendar, history, settings, clean quit; no live API calls."
         )
 
 

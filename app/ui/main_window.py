@@ -45,7 +45,9 @@ class MainWindow(ctk.CTk):
         self.current_view = "queue"
         self._quitting = False
         self._tick_job: str | None = None
+        self._pump_job: str | None = None
         self._maintenance_stop = threading.Event()
+
 
         self.title("Agnia Bluesky Suite")
         self.geometry("1180x780")
@@ -236,19 +238,43 @@ class MainWindow(ctk.CTk):
             self.quit_app()
 
     def _pump_ui(self):
+        if getattr(self, "_quitting", False):
+            return
         drain_ui_callbacks()
-        if self.winfo_exists():
+        try:
+            exists = self.winfo_exists()
+        except Exception:
+            return
+        if not exists:
+            return
+        try:
             marker = self.db.path.parent / ".show-window"
             if marker.exists():
                 marker.unlink(missing_ok=True)
                 self._show_window_ui()
-            self.after(50, self._pump_ui)
+        except Exception:
+            pass
+        if not getattr(self, "_quitting", False):
+            try:
+                self._pump_job = self.after(50, self._pump_ui)
+            except Exception:
+                self._pump_job = None
 
     def report_callback_exception(self, exc, value, traceback):
-        get_logger().error("Ошибка интерфейса", exc_info=(exc, value, traceback))
-        from tkinter import messagebox
+        if getattr(self, "_quitting", False):
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            get_logger().error("Ошибка интерфейса", exc_info=(exc, value, traceback))
+            from tkinter import messagebox
 
-        messagebox.showerror("Agnia Bluesky Suite", str(value), parent=self)
+            messagebox.showerror("Agnia Bluesky Suite", str(value), parent=self)
+        except Exception:
+            pass
 
     def quit_app(self):
         if threading.current_thread() is not threading.main_thread():
@@ -298,11 +324,29 @@ class MainWindow(ctk.CTk):
         threading.Thread(target=finish, name="shutdown", daemon=True).start()
 
     def _finish_quit(self):
+        self._quitting = True
         set_ui_callback(None)
-        self.tray.stop()
         if self._tick_job:
-            self.after_cancel(self._tick_job)
-        self.destroy()
+            try:
+                self.after_cancel(self._tick_job)
+            except Exception:
+                pass
+            self._tick_job = None
+        if self._pump_job:
+            try:
+                self.after_cancel(self._pump_job)
+            except Exception:
+                pass
+            self._pump_job = None
+        self.tray.stop()
+        try:
+            self.quit()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _maintenance(self):
         from app.backup import automatic_backup

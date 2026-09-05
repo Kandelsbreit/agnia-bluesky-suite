@@ -98,9 +98,14 @@ def drain_ui_callbacks() -> None:
         except queue.Empty:
             return
         try:
-            if widget.winfo_exists():
+            try:
+                exists = widget.winfo_exists()
+            except Exception:
+                exists = False
+            if exists:
                 callback()
         except Exception:
             from app.logging_setup import get_logger
 
             get_logger().exception("Ошибка обновления интерфейса")
+
