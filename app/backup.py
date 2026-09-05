@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def create_backup(db, destination: Path, password: str = "") -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="agnia-backup-") as temp:
         copy = Path(temp) / "agnia_bluesky.db"
-        with db._lock, db._connection() as source, sqlite3.connect(copy) as target:
+        with db._lock, db._connection() as source, closing(sqlite3.connect(copy)) as target:
             source.backup(target)
             target.execute("PRAGMA journal_mode=DELETE")
             if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -39,19 +40,19 @@ def create_backup(db, destination: Path, password: str = "") -> Path:
                 if "media_json" in columns:
                     for row in target.execute(f"SELECT media_json FROM {table}"):
                         refs.update(m["file"] for m in json.loads(row[0]) if m.get("file"))
-            output = io.BytesIO()
-            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as z:
-                z.write(copy, "agnia_bluesky.db")
-                key = root / ".secret_key"
-                if key.exists():
-                    z.write(key, ".secret_key")
-                for name in refs:
-                    path = root / "media" / name
-                    if Path(name).name != name or not path.is_file():
-                        raise ValueError("Не найдено вложение для резервной копии")
-                    z.write(path, "media/" + name)
-                z.writestr("manifest.json", json.dumps({"format": 2, "created_at": datetime.now(UTC).isoformat()}))
-            raw = output.getvalue()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(copy, "agnia_bluesky.db")
+            key = root / ".secret_key"
+            if key.exists():
+                z.write(key, ".secret_key")
+            for name in refs:
+                path = root / "media" / name
+                if Path(name).name != name or not path.is_file():
+                    raise ValueError("Не найдено вложение для резервной копии")
+                z.write(path, "media/" + name)
+            z.writestr("manifest.json", json.dumps({"format": 2, "created_at": datetime.now(UTC).isoformat()}))
+        raw = output.getvalue()
     if password:
         if len(password) < 8:
             raise ValueError("Пароль резервной копии: минимум 8 символов")
@@ -102,7 +103,7 @@ def stage_restore(archive: Path, root: Path, password: str = "") -> None:
         if json.loads((temp / "manifest.json").read_text())["format"] != 2:
             raise ValueError("Неподдерживаемая версия резервной копии")
         database = temp / "agnia_bluesky.db"
-        with sqlite3.connect(database) as c:
+        with closing(sqlite3.connect(database)) as c:
             if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise ValueError("Повреждённая база данных")
             if c.execute("PRAGMA user_version").fetchone()[0] > 2:

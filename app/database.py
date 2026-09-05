@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ class Database:
         self._lock = threading.RLock()
         self.revision = 0
         if self.path.exists() and self.path.stat().st_size:
-            with sqlite3.connect(self.path) as existing:
+            with closing(sqlite3.connect(self.path)) as existing:
                 version = existing.execute("PRAGMA user_version").fetchone()[0]
                 if version > 2:
                     raise ValueError("Для этой базы нужна более новая версия программы")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import closing
 from pathlib import Path
 
 APP_DIR_NAME = "AgniaBlueskySuite"
@@ -56,7 +57,7 @@ def _migrate_legacy_db_if_needed(target_dir: Path) -> None:
 
     temp = target_db.with_suffix(".migrating")
     try:
-        with sqlite3.connect(legacy_db) as source, sqlite3.connect(temp) as dest:
+        with closing(sqlite3.connect(legacy_db)) as source, closing(sqlite3.connect(temp)) as dest:
             source.backup(dest)
             dest.execute("PRAGMA journal_mode=DELETE")
             if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
