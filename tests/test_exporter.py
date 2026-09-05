@@ -37,13 +37,15 @@ class ExportGateway:
 
 def test_export_filters_reposts_replies_dates_and_duplicates(tmp_path):
     gateway = ExportGateway(
-        [[
-            feed_item("at://1", "Keep", "2026-02-02T00:00:00Z"),
-            feed_item("at://2", "Keep", "2026-02-01T00:00:00Z"),
-            feed_item("at://3", "Repost", "2026-02-01T00:00:00Z", reason={"by": "x"}),
-            feed_item("at://4", "Reply", "2026-02-01T00:00:00Z", reply=True),
-            feed_item("at://5", "Old", "2025-01-01T00:00:00Z"),
-        ]]
+        [
+            [
+                feed_item("at://1", "Keep", "2026-02-02T00:00:00Z"),
+                feed_item("at://2", "Keep", "2026-02-01T00:00:00Z"),
+                feed_item("at://3", "Repost", "2026-02-01T00:00:00Z", reason={"by": "x"}),
+                feed_item("at://4", "Reply", "2026-02-01T00:00:00Z", reply=True),
+                feed_item("at://5", "Old", "2025-01-01T00:00:00Z"),
+            ]
+        ]
     )
     result = export_account(
         gateway,
@@ -62,10 +64,12 @@ def test_export_filters_reposts_replies_dates_and_duplicates(tmp_path):
 
 def test_export_can_keep_self_thread_and_split_other_replies(tmp_path):
     gateway = ExportGateway(
-        [[
-            feed_item("at://1", "Thread continuation", "2026-02-02T00:00:00Z", reply=True, parent="did:me"),
-            feed_item("at://2", "Reply elsewhere", "2026-02-03T00:00:00Z", reply=True),
-        ]]
+        [
+            [
+                feed_item("at://1", "Thread continuation", "2026-02-02T00:00:00Z", reply=True, parent="did:me"),
+                feed_item("at://2", "Reply elsewhere", "2026-02-03T00:00:00Z", reply=True),
+            ]
+        ]
     )
     result = export_account(
         gateway,
@@ -80,10 +84,12 @@ def test_export_can_keep_self_thread_and_split_other_replies(tmp_path):
 
 def test_ai_export_is_one_plain_original_posts_file(tmp_path):
     gateway = ExportGateway(
-        [[
-            feed_item("at://1", "Original voice", "2026-02-02T00:00:00Z"),
-            feed_item("at://2", "A reply", "2026-02-03T00:00:00Z", reply=True),
-        ]]
+        [
+            [
+                feed_item("at://1", "Original voice", "2026-02-02T00:00:00Z"),
+                feed_item("at://2", "A reply", "2026-02-03T00:00:00Z", reply=True),
+            ]
+        ]
     )
     result = export_account(gateway, "me.test", tmp_path, ExportOptions(ai_export=True, replies="include"))
     assert result.files[0].name == "original_posts_me.test.txt"
@@ -99,9 +105,7 @@ def test_combined_queue_contains_each_account(tmp_path):
         tmp_path,
         ExportOptions(),
     )
-    second_gateway = ExportGateway(
-        [[feed_item("at://2", "Second", "2026-02-03T00:00:00Z", handle="other.test")]]
-    )
+    second_gateway = ExportGateway([[feed_item("at://2", "Second", "2026-02-03T00:00:00Z", handle="other.test")]])
     second_gateway.resolve_profile = lambda _actor: Profile("other.test", "did:me", "Other", posts_count=1)
     second = export_account(second_gateway, "other.test", tmp_path, ExportOptions())
     path = write_combined_queue(tmp_path / "combined.txt", [second, first])

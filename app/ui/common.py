@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 from collections.abc import Callable
 
 import customtkinter as ctk
@@ -31,7 +32,8 @@ class AccountSelector(ctk.CTkFrame):
         self.variable = ctk.StringVar(value="")
         self.combo = ctk.CTkComboBox(
             self,
-            width=280,
+            width=260,
+            state="readonly",
             variable=self.variable,
             values=["Нет аккаунтов"],
             command=self._changed,
@@ -81,8 +83,24 @@ def clear_children(widget) -> None:
         child.destroy()
 
 
+_callbacks = queue.SimpleQueue()
+
+
 def ui_call(widget, callback: Callable[[], None]) -> None:
-    try:
-        widget.after(0, callback)
-    except Exception:
-        pass
+    # Tk calls only run on the main thread, including .after and winfo_exists.
+    _callbacks.put((widget, callback))
+
+
+def drain_ui_callbacks() -> None:
+    for _ in range(300):
+        try:
+            widget, callback = _callbacks.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            if widget.winfo_exists():
+                callback()
+        except Exception:
+            from app.logging_setup import get_logger
+
+            get_logger().exception("Ошибка обновления интерфейса")

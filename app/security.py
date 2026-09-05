@@ -4,8 +4,10 @@ import base64
 import ctypes
 import hashlib
 import hmac
+import os
 import secrets
 import sys
+import threading
 from ctypes import wintypes
 
 _ENTROPY = b"AgniaBlueskySuite/passwords/v1"
@@ -105,28 +107,37 @@ def _unprotect_windows(data: bytes) -> bytes:
         local_free(ctypes.cast(out_blob.pbData, wintypes.HLOCAL))
 
 
-def _get_or_create_master_key() -> bytes:
+_key_lock = threading.RLock()
+
+
+def _get_or_create_master_key(*, create: bool = True) -> bytes:
     from app.paths import data_dir
 
     key_file = data_dir() / ".secret_key"
-    if key_file.exists():
-        try:
-            content = key_file.read_bytes()
-            if len(content) == 32:
-                return content
-        except OSError:
-            pass
-    key = secrets.token_bytes(32)
-    try:
-        key_file.write_bytes(key)
-        if sys.platform == "win32":
+    with _key_lock:
+        if key_file.exists():
             try:
-                ctypes.windll.kernel32.SetFileAttributesW(str(key_file), 0x02)  # FILE_ATTRIBUTE_HIDDEN
-            except Exception:
-                pass
-    except OSError:
-        pass
-    return key
+                key = key_file.read_bytes()
+            except OSError as exc:
+                raise SecretError("Не удалось прочитать ключ аккаунтов") from exc
+            if len(key) != 32:
+                raise SecretError("Файл ключа повреждён. Восстановите резервную копию.")
+            return key
+        if not create:
+            raise SecretError("Файл ключа отсутствует. Восстановите резервную копию.")
+        key = secrets.token_bytes(32)
+        temp = key_file.with_name(".secret_key." + secrets.token_hex(8))
+        try:
+            fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(key)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, key_file)
+        except OSError as exc:
+            temp.unlink(missing_ok=True)
+            raise SecretError("Ключ не сохранён на диск. Пароль не был сохранён.") from exc
+        return key
 
 
 def _keystream(key: bytes, iv: bytes, length: int) -> bytes:
@@ -159,7 +170,7 @@ def _decrypt_portable_v2(payload: bytes, master_key: bytes | None = None) -> byt
     if len(payload) < 16 + 16 + 32:
         raise SecretError("Invalid portable secret payload length")
     if master_key is None:
-        master_key = _get_or_create_master_key()
+        master_key = _get_or_create_master_key(create=False)
     salt = payload[:16]
     iv = payload[16:32]
     tag = payload[32:64]
@@ -186,18 +197,18 @@ def unprotect_secret(stored: str | None) -> str:
     if not stored:
         return ""
     if stored.startswith(_PORTABLE_V2_PREFIX):
-        payload = base64.b64decode(stored[len(_PORTABLE_V2_PREFIX):])
+        payload = base64.b64decode(stored[len(_PORTABLE_V2_PREFIX) :])
         return _decrypt_portable_v2(payload).decode("utf-8")
     if stored.startswith(_DPAPI_PREFIX):
         if sys.platform != "win32":
             raise SecretError("Windows DPAPI secret cannot be decrypted on non-Windows")
         try:
-            payload = base64.b64decode(stored[len(_DPAPI_PREFIX):])
+            payload = base64.b64decode(stored[len(_DPAPI_PREFIX) :])
             return _unprotect_windows(payload).decode("utf-8")
         except Exception as exc:
             raise SecretError(f"DPAPI decryption failed: {exc}") from exc
     if stored.startswith(_PORTABLE_PREFIX):
-        return base64.b64decode(stored[len(_PORTABLE_PREFIX):]).decode("utf-8")
+        return base64.b64decode(stored[len(_PORTABLE_PREFIX) :]).decode("utf-8")
     raise SecretError("Unknown secret format")
 
 
@@ -207,4 +218,3 @@ def secret_is_dpapi(stored: str | None) -> bool:
 
 def secret_is_portable(stored: str | None) -> bool:
     return bool(stored and (stored.startswith(_PORTABLE_V2_PREFIX) or stored.startswith(_PORTABLE_PREFIX)))
-

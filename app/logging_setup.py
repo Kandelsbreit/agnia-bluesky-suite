@@ -68,5 +68,3 @@ def clear_log_file() -> None:
             fh.truncate(0)
     except OSError:
         pass
-
-

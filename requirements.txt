@@ -5,3 +5,4 @@ pillow==12.3.0
 pystray==0.19.5
 regex==2025.7.34
 
+cryptography==50.0.1

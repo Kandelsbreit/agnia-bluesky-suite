@@ -112,7 +112,6 @@ def new_record_key() -> str:
     return "".join(chars)
 
 
-
 def format_duration(seconds: float) -> str:
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)

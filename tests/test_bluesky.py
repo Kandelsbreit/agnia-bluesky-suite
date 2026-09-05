@@ -23,13 +23,9 @@ class FakeClient:
         self.record_exists = record_exists
         self.created = []
         self.app = SimpleNamespace(
-            bsky=SimpleNamespace(
-                feed=SimpleNamespace(post=SimpleNamespace(create=self.create_post))
-            )
+            bsky=SimpleNamespace(feed=SimpleNamespace(post=SimpleNamespace(create=self.create_post)))
         )
-        self.com = SimpleNamespace(
-            atproto=SimpleNamespace(repo=SimpleNamespace(get_record=self.get_record))
-        )
+        self.com = SimpleNamespace(atproto=SimpleNamespace(repo=SimpleNamespace(get_record=self.get_record)))
 
     def login(self, handle, password):
         assert password == "app-password"
@@ -70,7 +66,7 @@ def test_publish_recovers_existing_record_after_uncertain_error():
     result = gateway.publish_text("Hello", "same-key")
     assert result.recovered_existing is True
     assert result.cid == "existing-cid"
-    assert client.created[0][2] == "same-key"
+    assert client.created == []  # Verification happens before any duplicate create request.
 
 
 def test_publish_keeps_retryable_error_if_record_cannot_be_verified():
@@ -105,13 +101,9 @@ class ReauthClient:
         self.login_count = 0
         self.post_attempts = 0
         self.app = SimpleNamespace(
-            bsky=SimpleNamespace(
-                feed=SimpleNamespace(post=SimpleNamespace(create=self.create_post))
-            )
+            bsky=SimpleNamespace(feed=SimpleNamespace(post=SimpleNamespace(create=self.create_post)))
         )
-        self.com = SimpleNamespace(
-            atproto=SimpleNamespace(repo=SimpleNamespace(get_record=self.get_record))
-        )
+        self.com = SimpleNamespace(atproto=SimpleNamespace(repo=SimpleNamespace(get_record=self.get_record)))
 
     def login(self, handle, password):
         self.login_count += 1
@@ -151,17 +143,17 @@ def test_extract_facets_byte_indices_and_tags():
     # 1. #ts
     f0 = facets[0]
     assert f0.features[0].tag == "ts"
-    assert text.encode("utf-8")[f0.index.byte_start:f0.index.byte_end].decode("utf-8") == "#ts"
+    assert text.encode("utf-8")[f0.index.byte_start : f0.index.byte_end].decode("utf-8") == "#ts"
 
     # 2. #питер (Cyrillic UTF-8 multi-byte)
     f1 = facets[1]
     assert f1.features[0].tag == "питер"
-    assert text.encode("utf-8")[f1.index.byte_start:f1.index.byte_end].decode("utf-8") == "#питер"
+    assert text.encode("utf-8")[f1.index.byte_start : f1.index.byte_end].decode("utf-8") == "#питер"
 
     # 3. URL
     f2 = facets[2]
     assert f2.features[0].uri == "https://example.com/test"
-    assert text.encode("utf-8")[f2.index.byte_start:f2.index.byte_end].decode("utf-8") == "https://example.com/test"
+    assert text.encode("utf-8")[f2.index.byte_start : f2.index.byte_end].decode("utf-8") == "https://example.com/test"
 
 
 def test_publish_passes_facets_to_record():
@@ -210,5 +202,3 @@ def test_get_author_recent_posts():
     assert posts[0]["text"] == "Hello recent post #1"
     assert posts[0]["uri"] == "at://did:plc:me/app.bsky.feed.post/post1"
     assert posts[0]["rkey"] == "post1"
-
-

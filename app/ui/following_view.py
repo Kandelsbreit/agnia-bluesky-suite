@@ -60,7 +60,9 @@ class FollowingView(ctk.CTkFrame):
         self.limit_entry.pack(side="left", padx=(6, 14))
         self.start_button = ctk.CTkButton(bottom, text="Начать", fg_color=GREEN, command=self.start)
         self.start_button.pack(side="left", padx=5)
-        self.pause_button = ctk.CTkButton(bottom, text="Пауза", fg_color=AMBER, state="disabled", command=self.toggle_pause)
+        self.pause_button = ctk.CTkButton(
+            bottom, text="Пауза", fg_color=AMBER, state="disabled", command=self.toggle_pause
+        )
         self.pause_button.pack(side="left", padx=5)
         self.stop_button = ctk.CTkButton(bottom, text="Стоп", fg_color=RED, state="disabled", command=self.stop)
         self.stop_button.pack(side="left", padx=5)
@@ -179,6 +181,7 @@ class FollowingView(ctk.CTkFrame):
                     f"Готово: новых подписок {stats.get('completed', 0)}, "
                     f"пропущено {stats.get('skipped', 0)}, ошибок {stats.get('errors', 0)}."
                 )
+
         ui_call(self, update)
 
     def toggle_pause(self) -> None:

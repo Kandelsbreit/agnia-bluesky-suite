@@ -15,6 +15,7 @@ def run_smoke_test() -> None:
     checkpoint("importing packaged dependencies")
     import atproto  # noqa: F401
     import customtkinter  # noqa: F401
+
     if sys.platform == "win32":
         import pystray  # noqa: F401
 

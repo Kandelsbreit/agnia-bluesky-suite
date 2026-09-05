@@ -51,8 +51,7 @@ def _is_repost(item: dict, did: str, handle: str) -> bool:
     author_did = str(author.get("did") or "")
     author_handle = str(author.get("handle") or "").lower()
     return bool(
-        (did and author_did and did != author_did)
-        or (handle and author_handle and handle.lower() != author_handle)
+        (did and author_did and did != author_did) or (handle and author_handle and handle.lower() != author_handle)
     )
 
 
@@ -76,7 +75,18 @@ def format_block(handle: str, text: str, queue_format: bool) -> str:
 def _write_blocks(path: Path, blocks: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n\n---\n\n".join(blocks)
-    path.write_text(content + ("\n" if content else ""), encoding="utf-8", newline="\n")
+    import os
+    import tempfile
+
+    fd, name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content + ("\n" if content else ""))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def export_account(
@@ -126,7 +136,7 @@ def export_account(
 
         if not feed:
             break
-        page_has_not_too_old = options.date_from is None
+
         for item in feed:
             if cancel_event and cancel_event.is_set():
                 result.cancelled = True
@@ -159,7 +169,6 @@ def export_account(
                 if options.date_from and post_date < options.date_from:
                     stats.date_skipped += 1
                     continue
-                page_has_not_too_old = True
 
             reply = _is_reply(item, profile.did, options.self_threads_as_posts)
             normalized = " ".join(normalize_text(text).split())
@@ -190,8 +199,6 @@ def export_account(
             break
         if progress:
             progress(stats, page, profile.posts_count)
-        if options.date_from and not page_has_not_too_old:
-            break
         if not next_cursor or next_cursor == cursor:
             break
         cursor = next_cursor
@@ -200,6 +207,9 @@ def export_account(
             break
         if not cancel_event:
             time.sleep(0.08)
+
+    if result.cancelled:
+        return result
 
     posts.sort(key=lambda item: item[0], reverse=not options.oldest_first)
     replies.sort(key=lambda item: item[0], reverse=not options.oldest_first)

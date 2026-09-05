@@ -168,4 +168,3 @@ def test_like_automation_manager_pause_and_stop_all(db):
     w1.join(2)
     w2.join(2)
     assert not manager.is_running()
-

@@ -1,2 +1,1 @@
 """CustomTkinter user interface."""
-

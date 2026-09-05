@@ -2,7 +2,7 @@ name: Windows build and release
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   workflow_dispatch:
   release:
     types: [published]
@@ -11,7 +11,32 @@ permissions:
   contents: write
 
 jobs:
+  gui-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest
+      - run: python -m ruff check .
+      - name: Test actual GUI offline
+        run: xvfb-run -a -s "-screen 0 1280x900x24" python tests/gui_smoke.py
+        env:
+          AGNIA_GUI_SCREENSHOTS: gui-screenshots
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: GUI-screenshots
+          path: gui-screenshots/*.png
+          if-no-files-found: warn
   test-build-smoke:
+    needs: gui-test
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -108,3 +133,22 @@ jobs:
             "dist\AgniaBlueskySuite.exe" `
             "release\AgniaBlueskySuite-v$version-windows-x64.zip" `
             "release\SHA256SUMS.txt" --clobber
+
+      - name: Publish verified release on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (python -c "import app; print(app.__version__)").Trim()
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists; preserving its assets."
+            exit 0
+          }
+          gh release create $tag --target "${{ github.sha }}" --title "Agnia Bluesky Suite $version" --notes-file "docs/RELEASE_NOTES_1.3.0.md" `
+            "dist/AgniaBlueskySuite.exe" `
+            "release/AgniaBlueskySuite-v$version-windows-x64.zip" `
+            "release/SHA256SUMS.txt"
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }

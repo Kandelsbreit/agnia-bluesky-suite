@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from app.bluesky import BlueskyError, BlueskyGateway
+from app.bluesky import BlueskyGateway
 from app.database import Database
 from app.exporter import ExportOptions, export_account, write_combined_queue
 from app.paths import exports_dir
@@ -37,7 +37,9 @@ class ExportView(ctk.CTkFrame):
 
         accounts_card = ctk.CTkFrame(scroll)
         accounts_card.pack(fill="x", padx=8, pady=6)
-        ctk.CTkLabel(accounts_card, text="Аккаунты", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
+        ctk.CTkLabel(accounts_card, text="Аккаунты", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 4)
+        )
         self.accounts_frame = ctk.CTkFrame(accounts_card, fg_color="transparent")
         self.accounts_frame.pack(fill="x", padx=12, pady=(2, 10))
 
@@ -196,20 +198,22 @@ class ExportView(ctk.CTkFrame):
                         options,
                         cancel_event=self.cancel_event,
                         log=self._append_threadsafe,
-                        progress=lambda stats, page, total, i=index: self._progress(i, len(selected), stats.fetched, total),
+                        progress=lambda stats, page, total, i=index: self._progress(
+                            i, len(selected), stats.fetched, total
+                        ),
                     )
                     results.append(result)
-                except BlueskyError as exc:
+                except Exception as exc:
                     failures.append(f"@{account['handle']}: {exc}")
                     self._append_threadsafe(f"Ошибка @{account['handle']}: {exc}")
             if not ai_export and len(results) > 1 and not self.cancel_event.is_set():
-                write_combined_queue(
-                    output / "combined_queue_posts.txt",
-                    results,
-                    options.queue_format,
-                    options.oldest_first,
-                )
-                self._append_threadsafe("Создан combined_queue_posts.txt")
+                try:
+                    write_combined_queue(
+                        output / "combined_queue_posts.txt", results, options.queue_format, options.oldest_first
+                    )
+                    self._append_threadsafe("Создан combined_queue_posts.txt")
+                except Exception as exc:
+                    failures.append(f"Общий файл: {exc}")
             ui_call(self, lambda: self._finish(results, failures, output))
 
         threading.Thread(target=work, name="post-export", daemon=True).start()

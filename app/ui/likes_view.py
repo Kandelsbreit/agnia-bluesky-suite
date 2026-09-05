@@ -111,7 +111,9 @@ class LikesView(ctk.CTkFrame):
         controls.grid(row=2, column=0, sticky="ew", padx=18, pady=6)
         self.start_button = ctk.CTkButton(controls, text="Начать", fg_color=GREEN, command=self.start)
         self.start_button.pack(side="left", padx=(0, 8))
-        self.pause_button = ctk.CTkButton(controls, text="Пауза", fg_color=AMBER, state="disabled", command=self.toggle_pause)
+        self.pause_button = ctk.CTkButton(
+            controls, text="Пауза", fg_color=AMBER, state="disabled", command=self.toggle_pause
+        )
         self.pause_button.pack(side="left", padx=8)
         self.stop_button = ctk.CTkButton(controls, text="Стоп", fg_color=RED, state="disabled", command=self.stop)
         self.stop_button.pack(side="left", padx=8)
@@ -224,7 +226,9 @@ class LikesView(ctk.CTkFrame):
             skip_reposts=bool(self.skip_reposts.get()),
         )
         if automatic:
-            self._append(f"Автозапуск: запущено {started_count} акк. в режиме {'24/7' if options.continuous else 'одна сессия'}.")
+            self._append(
+                f"Автозапуск: запущено {started_count} акк. в режиме {'24/7' if options.continuous else 'одна сессия'}."
+            )
         else:
             self._append(f"Запущено {started_count} акк. в режиме {'24/7' if options.continuous else 'одна сессия'}.")
 
@@ -287,6 +291,7 @@ class LikesView(ctk.CTkFrame):
                         f"Сессия завершена: лайков {stats.get('completed', 0)}, пропущено {stats.get('skipped', 0)}, "
                         f"ошибок {stats.get('errors', 0)}."
                     )
+
         ui_call(self, update)
 
     def toggle_pause(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -10,7 +11,15 @@ from typing import Any
 from app.logging_setup import get_logger
 from app.paths import database_path
 from app.security import SecretError, protect_secret, unprotect_secret
-from app.utils import content_hash, new_record_key, normalize_handle, normalize_text, utcnow_iso
+from app.utils import (
+    content_hash,
+    new_record_key,
+    normalize_handle,
+    normalize_text,
+    parse_iso,
+    post_validation_error,
+    utcnow_iso,
+)
 
 DEFAULT_SETTINGS: dict[str, str] = {
     "theme": "dark",
@@ -32,7 +41,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "auto_like_account_ids": "",
     "auto_like_247_mode": "1",
     "auto_like_cycle_interval": "60",
-    "auto_unpause_queues_on_start": "1",
+    "auto_unpause_queues_on_start": "0",
     "auto_like_source": "timeline",
     "auto_like_query": "",
     "auto_like_skip_replies": "1",
@@ -45,15 +54,28 @@ class Database:
         self.path = Path(path) if path else database_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self.revision = 0
+        if self.path.exists() and self.path.stat().st_size:
+            with sqlite3.connect(self.path) as existing:
+                version = existing.execute("PRAGMA user_version").fetchone()[0]
+                if version > 2:
+                    raise ValueError("Для этой базы нужна более новая версия программы")
+            if version < 2:
+                from app.backup import create_backup
+
+                create_backup(
+                    self, self.path.parent / "backups" / ("before-v1.3-" + utcnow_iso().replace(":", "-") + ".zip")
+                )
         self._init_schema()
         self._heal_legacy_queue_keys()
-        self._migrate_secrets_to_portable()
+        self._migrate_outbox()
         self._prune_queue_already_in_history()
 
     @contextmanager
     def _connection(self):
         connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         connection.row_factory = sqlite3.Row
+        connection.create_function("casefold", 1, lambda value: str(value or "").casefold(), deterministic=True)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
@@ -69,6 +91,7 @@ class Database:
                 connection.execute("BEGIN IMMEDIATE")
                 yield connection
                 connection.commit()
+                self.revision += 1
             except Exception:
                 connection.rollback()
                 raise
@@ -163,14 +186,13 @@ class Database:
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                 DEFAULT_SETTINGS.items(),
             )
-            connection.execute("PRAGMA user_version=1")
 
     def _heal_legacy_queue_keys(self) -> int:
         """Upgrade any non-TID (e.g. 32-char UUID hex) keys to canonical 13-char TIDs."""
         updated = 0
         with self._write() as connection:
             rows = connection.execute(
-                "SELECT id, record_key FROM queue WHERE length(record_key) != 13"
+                "SELECT id, record_key FROM queue WHERE length(record_key) != 13 AND attempt_count=0"
             ).fetchall()
             if rows:
                 updates = [(new_record_key(), row["id"]) for row in rows]
@@ -187,37 +209,36 @@ class Database:
             )
         return updated
 
-    def _migrate_secrets_to_portable(self) -> int:
-        """Migrate DPAPI secrets to portable-v2 format so they work across computers."""
-        migrated = 0
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT id, handle, password_cipher FROM accounts WHERE password_cipher LIKE 'dpapi:%'"
-            ).fetchall()
-        if not rows:
-            return 0
+    def _migrate_outbox(self) -> None:
         with self._write() as connection:
-            for row in rows:
-                try:
-                    plaintext = unprotect_secret(row["password_cipher"])
-                    if plaintext:
-                        new_cipher = protect_secret(plaintext)
-                        connection.execute(
-                            "UPDATE accounts SET password_cipher=? WHERE id=?",
-                            (new_cipher, row["id"]),
-                        )
-                        migrated += 1
-                        get_logger().info(
-                            "[@%s] Пароль аккаунта переведён в переносимый формат для работы на любых ПК",
-                            row["handle"],
-                        )
-                except Exception as exc:
-                    get_logger().warning(
-                        "[@%s] Не удалось перевести старый пароль DPAPI в переносимый формат: %s",
-                        row["handle"],
-                        exc,
-                    )
-        return migrated
+            for table, columns in {
+                "queue": {
+                    "state": "TEXT NOT NULL DEFAULT 'pending'",
+                    "media_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "scheduled_at": "TEXT",
+                    "send_now": "INTEGER NOT NULL DEFAULT 0",
+                    "record_json": "TEXT NOT NULL DEFAULT ''",
+                },
+                "post_history": {"media_json": "TEXT NOT NULL DEFAULT '[]'", "last_error": "TEXT NOT NULL DEFAULT ''"},
+            }.items():
+                existing = {r["name"] for r in connection.execute(f"PRAGMA table_info({table})")}
+                for name, definition in columns.items():
+                    if name not in existing:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS drafts (account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, content TEXT NOT NULL DEFAULT '', media_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)"
+            )
+            columns = {r["name"] for r in connection.execute("PRAGMA table_info(drafts)")}
+            if "schedule_text" not in columns:
+                connection.execute("ALTER TABLE drafts ADD COLUMN schedule_text TEXT NOT NULL DEFAULT ''")
+            connection.execute("PRAGMA user_version=2")
+
+    def recover_interrupted(self) -> None:
+        # Called once after the process lock has been acquired, never by another DB reader.
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE queue SET state='uncertain', last_error='Отправка прервана. Будет проверен прежний ключ.' WHERE state='sending'"
+            )
 
     def _prune_queue_already_in_history(self) -> int:
         """Remove any queue items that have already been published and exist in post_history."""
@@ -226,7 +247,7 @@ class Database:
                 """
                 DELETE FROM queue WHERE id IN (
                     SELECT q.id FROM queue q
-                    JOIN post_history h ON q.account_id = h.account_id AND q.content_hash = h.content_hash
+                    JOIN post_history h ON q.account_id = h.account_id AND q.content_hash = h.content_hash AND h.status='published'
                 )
                 """
             )
@@ -237,7 +258,6 @@ class Database:
                     count,
                 )
             return count
-
 
     # Settings
     def get_setting(self, key: str, default: str | None = None) -> str:
@@ -265,16 +285,14 @@ class Database:
     def set_setting(self, key: str, value: Any) -> None:
         with self._write() as connection:
             connection.execute(
-                "INSERT INTO settings(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, str(value)),
             )
 
     def set_settings(self, values: dict[str, Any]) -> None:
         with self._write() as connection:
             connection.executemany(
-                "INSERT INTO settings(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [(key, str(value)) for key, value in values.items()],
             )
 
@@ -312,15 +330,8 @@ class Database:
             return item, ""
         try:
             secret = unprotect_secret(cipher)
-            if cipher.startswith("dpapi:") and secret:
-                try:
-                    new_cipher = protect_secret(secret)
-                    with self._write() as conn:
-                        conn.execute("UPDATE accounts SET password_cipher=? WHERE id=?", (new_cipher, account_id))
-                except Exception:
-                    pass
             return item, secret
-        except SecretError as exc:
+        except (SecretError, ValueError, UnicodeError) as exc:
             get_logger().error("Не удалось расшифровать App Password для @%s: %s", item["handle"], exc)
             item["secret_error"] = str(exc)
             return item, ""
@@ -343,9 +354,7 @@ class Database:
         now = utcnow_iso()
         cipher = protect_secret(password) if password is not None else None
         with self._write() as connection:
-            existing = connection.execute(
-                "SELECT id FROM accounts WHERE handle=? COLLATE NOCASE", (clean,)
-            ).fetchone()
+            existing = connection.execute("SELECT id FROM accounts WHERE handle=? COLLATE NOCASE", (clean,)).fetchone()
             if existing:
                 fields = [
                     "interval_minutes=?",
@@ -393,6 +402,10 @@ class Database:
 
     def delete_account(self, account_id: int) -> None:
         with self._write() as connection:
+            if connection.execute(
+                "SELECT 1 FROM queue WHERE account_id=? AND state IN ('sending','uncertain')", (account_id,)
+            ).fetchone():
+                raise ValueError("У аккаунта есть незавершённая отправка. Сначала проверьте её результат.")
             connection.execute("DELETE FROM accounts WHERE id=?", (account_id,))
             active = connection.execute("SELECT value FROM settings WHERE key='active_account_id'").fetchone()
             if active and active["value"] == str(account_id):
@@ -439,7 +452,9 @@ class Database:
 
     def unpause_all_queues(self) -> int:
         with self._write() as connection:
-            cursor = connection.execute("UPDATE accounts SET queue_paused=0, updated_at=? WHERE queue_paused=1", (utcnow_iso(),))
+            cursor = connection.execute(
+                "UPDATE accounts SET queue_paused=0, updated_at=? WHERE queue_paused=1", (utcnow_iso(),)
+            )
             return cursor.rowcount
 
     def update_runtime(self, account_id: int, **values: Any) -> None:
@@ -453,19 +468,36 @@ class Database:
             connection.execute(f"UPDATE accounts SET {sql}, updated_at=? WHERE id=?", params)
 
     # Queue
-    def enqueue_one(self, account: int | str, text: str, at_top: bool = False) -> int | None:
+    def enqueue_one(
+        self,
+        account: int | str,
+        text: str,
+        at_top: bool = False,
+        *,
+        media: list | None = None,
+        scheduled_at: str | None = None,
+        send_now: bool = False,
+    ) -> int | None:
         account_id = account if isinstance(account, int) else self.ensure_account(account)
         normalized = text.strip()
         if not normalized:
             raise ValueError("Пустой текст поста")
-        digest = content_hash(normalized)
+        from app.media import payload_hash, validate_media
+
+        validate_media(media or [])
+        if post_validation_error(normalized):
+            raise ValueError(post_validation_error(normalized))
+        digest = payload_hash(normalized, media or [])
+        if scheduled_at and not parse_iso(scheduled_at):
+            raise ValueError("Неверная дата публикации")
+        scheduled_at = parse_iso(scheduled_at).isoformat() if scheduled_at else None
         now = utcnow_iso()
         with self._write() as connection:
             duplicate = connection.execute(
                 """
                 SELECT 1 FROM queue WHERE account_id=? AND content_hash=?
                 UNION ALL
-                SELECT 1 FROM post_history WHERE account_id=? AND content_hash=?
+                SELECT 1 FROM post_history WHERE account_id=? AND content_hash=? AND status='published'
                 LIMIT 1
                 """,
                 (account_id, digest, account_id, digest),
@@ -486,10 +518,20 @@ class Database:
                 new_position = int(row["max_position"]) + 1
             cursor = connection.execute(
                 """
-                INSERT INTO queue(account_id,content,content_hash,record_key,position,created_at)
-                VALUES(?,?,?,?,?,?)
+                INSERT INTO queue(account_id,content,content_hash,record_key,position,created_at,media_json,scheduled_at,send_now)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """,
-                (account_id, normalized, digest, new_record_key(), new_position, now),
+                (
+                    account_id,
+                    normalized,
+                    digest,
+                    new_record_key(),
+                    new_position,
+                    now,
+                    json.dumps(media or [], ensure_ascii=False),
+                    scheduled_at,
+                    int(send_now),
+                ),
             )
             return int(cursor.lastrowid)
 
@@ -500,7 +542,7 @@ class Database:
                 """
                 SELECT 1 FROM queue WHERE account_id=? AND content_hash=?
                 UNION ALL
-                SELECT 1 FROM post_history WHERE account_id=? AND content_hash=?
+                SELECT 1 FROM post_history WHERE account_id=? AND content_hash=? AND status='published'
                 LIMIT 1
                 """,
                 (account_id, digest, account_id, digest),
@@ -511,19 +553,17 @@ class Database:
         digest = content_hash(text.strip())
         with self._lock, self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM post_history WHERE account_id=? AND content_hash=?",
+                "SELECT * FROM post_history WHERE account_id=? AND content_hash=? AND status='published'",
                 (account_id, digest),
             ).fetchone()
             return dict(row) if row else None
-
 
     def enqueue_many(self, items: Iterable[dict[str, str]]) -> tuple[int, int]:
         prepared = list(items)
         if not prepared:
             return 0, 0
         normalized_items = [
-            (normalize_handle(item.get("account_handle")), (item.get("content") or "").strip())
-            for item in prepared
+            (normalize_handle(item.get("account_handle")), (item.get("content") or "").strip()) for item in prepared
         ]
         normalized_items = [(handle, text) for handle, text in normalized_items if handle and text]
         if not normalized_items:
@@ -553,7 +593,7 @@ class Database:
                 f"""
                 SELECT account_id,content_hash FROM queue WHERE account_id IN ({id_placeholders})
                 UNION ALL
-                SELECT account_id,content_hash FROM post_history WHERE account_id IN ({id_placeholders})
+                SELECT account_id,content_hash FROM post_history WHERE account_id IN ({id_placeholders}) AND status='published'
                 """,
                 ids + ids,
             ).fetchall()
@@ -576,9 +616,7 @@ class Database:
                     continue
                 seen.add(key)
                 positions[account_id] = positions.get(account_id, 0) + 1
-                insert_rows.append(
-                    (account_id, text, digest, new_record_key(), positions[account_id], now)
-                )
+                insert_rows.append((account_id, text, digest, new_record_key(), positions[account_id], now))
 
             connection.executemany(
                 """INSERT INTO queue(account_id,content,content_hash,record_key,position,created_at)
@@ -612,16 +650,26 @@ class Database:
             return int(row["count"])
 
     def next_queue_item(self, account_id: int) -> dict[str, Any] | None:
-        rows = self.get_queue(account_id, limit=1)
-        return rows[0] if rows else None
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM queue WHERE account_id=? AND state IN ('pending','uncertain')
+                ORDER BY send_now DESC, CASE WHEN state='uncertain' THEN 0 WHEN scheduled_at<=? THEN 1 WHEN scheduled_at IS NULL THEN 2 ELSE 3 END,
+                CASE WHEN scheduled_at IS NOT NULL THEN scheduled_at END, position,id LIMIT 1""",
+                (account_id, utcnow_iso()),
+            ).fetchone()
+            return dict(row) if row else None
 
     def delete_queue_item(self, queue_id: int) -> bool:
         with self._write() as connection:
+            self._editable(connection, [queue_id])
             cursor = connection.execute("DELETE FROM queue WHERE id=?", (queue_id,))
             return cursor.rowcount > 0
 
     def clear_queue(self, account_id: int) -> int:
         with self._write() as connection:
+            self._editable(
+                connection, [r[0] for r in connection.execute("SELECT id FROM queue WHERE account_id=?", (account_id,))]
+            )
             cursor = connection.execute("DELETE FROM queue WHERE account_id=?", (account_id,))
             connection.execute(
                 "UPDATE accounts SET next_scheduled_at=NULL,retry_count=0,last_error='' WHERE id=?",
@@ -631,6 +679,7 @@ class Database:
 
     def move_queue_item(self, account_id: int, queue_id: int, direction: str) -> bool:
         with self._write() as connection:
+            self._editable(connection, [queue_id])
             current = connection.execute(
                 "SELECT id,position FROM queue WHERE account_id=? AND id=?", (account_id, queue_id)
             ).fetchone()
@@ -662,6 +711,7 @@ class Database:
                 return False
             if not other:
                 return False
+            self._editable(connection, [other["id"]])
             other_position = int(other["position"])
             if other_position == position:
                 other_position = position - 1 if direction == "up" else position + 1
@@ -694,7 +744,9 @@ class Database:
             raise ValueError("Unknown queue completion status")
         with self._write() as connection:
             stored = connection.execute("SELECT * FROM queue WHERE id=?", (queue_id,)).fetchone()
-            row: sqlite3.Row | dict[str, Any] | None = stored or snapshot
+            if status == "skipped" and stored:
+                self._editable(connection, [queue_id])
+            row: sqlite3.Row | dict[str, Any] | None = snapshot or stored
             if not row:
                 return False
             completed_at = utcnow_iso()
@@ -752,6 +804,15 @@ class Database:
                     values,
                 )
                 connection.execute("DELETE FROM queue WHERE id=?", (queue_id,))
+            connection.execute(
+                "UPDATE post_history SET media_json=?,last_error=? WHERE account_id=? AND content_hash=?",
+                (
+                    dict(row).get("media_json", "[]"),
+                    dict(row).get("last_error", ""),
+                    row["account_id"],
+                    row["content_hash"],
+                ),
+            )
             return True
 
     def record_published_post(
@@ -799,7 +860,7 @@ class Database:
 
         with self._write() as connection:
             queue_rows = connection.execute(
-                "SELECT id, content, content_hash, record_key FROM queue WHERE account_id=?",
+                "SELECT id, content, content_hash, record_key FROM queue WHERE account_id=? AND state='pending' AND attempt_count=0 AND media_json='[]'",
                 (account_id,),
             ).fetchall()
             if not queue_rows:
@@ -882,7 +943,8 @@ class Database:
             if account_id is None:
                 rows = connection.execute(
                     """SELECT h.*,a.handle AS account_handle FROM post_history h JOIN accounts a ON a.id=h.account_id
-                    ORDER BY h.completed_at DESC,h.id DESC LIMIT ?""", (limit,)
+                    ORDER BY h.completed_at DESC,h.id DESC LIMIT ?""",
+                    (limit,),
                 ).fetchall()
             else:
                 rows = connection.execute(
@@ -923,7 +985,8 @@ class Database:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """SELECT x.*,a.handle AS account_handle FROM activity x LEFT JOIN accounts a ON a.id=x.account_id
-                ORDER BY x.created_at DESC,x.id DESC LIMIT ?""", (limit,)
+                ORDER BY x.created_at DESC,x.id DESC LIMIT ?""",
+                (limit,),
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -959,3 +1022,124 @@ class Database:
                 ),
                 "activities": int(connection.execute("SELECT COUNT(*) FROM activity").fetchone()[0]),
             }
+
+    @staticmethod
+    def _editable(connection, ids: list[int]) -> None:
+        for qid in ids:
+            row = connection.execute("SELECT state,attempt_count,record_json FROM queue WHERE id=?", (qid,)).fetchone()
+            if row and (row["state"] in {"sending", "uncertain"} or row["record_json"] or row["attempt_count"]):
+                raise ValueError(
+                    "Этот пост уже отправлялся. Сначала проверьте результат кнопкой «Повторить / проверить»."
+                )
+
+    def get_queue_item(self, queue_id: int) -> dict | None:
+        with self._lock, self._connection() as c:
+            r = c.execute("SELECT * FROM queue WHERE id=?", (queue_id,)).fetchone()
+            return dict(r) if r else None
+
+    def claim_queue_item(self, queue_id: int) -> dict | None:
+        with self._write() as c:
+            changed = c.execute(
+                "UPDATE queue SET state='sending',attempt_count=attempt_count+1,last_attempt_at=? WHERE id=? AND state IN ('pending','uncertain')",
+                (utcnow_iso(), queue_id),
+            ).rowcount
+            r = c.execute("SELECT * FROM queue WHERE id=?", (queue_id,)).fetchone() if changed else None
+            return dict(r) if r else None
+
+    def save_prepared_record(self, queue_id: int, record: dict) -> None:
+        with self._write() as c:
+            c.execute(
+                "UPDATE queue SET record_json=? WHERE id=? AND state='sending'",
+                (json.dumps(record, ensure_ascii=False), queue_id),
+            )
+
+    def fail_queue_item(self, queue_id: int, error: str, *, uncertain: bool, definitive: bool = False) -> None:
+        with self._write() as c:
+            c.execute(
+                "UPDATE queue SET state=?,send_now=0,last_error=? WHERE id=?",
+                ("uncertain" if uncertain else "failed", error[:1000], queue_id),
+            )
+            if definitive:
+                c.execute("UPDATE queue SET record_json='',attempt_count=0 WHERE id=?", (queue_id,))
+
+    def request_send(self, queue_id: int) -> None:
+        with self._write() as c:
+            c.execute(
+                "UPDATE queue SET send_now=1,state=CASE WHEN state='failed' THEN 'uncertain' ELSE state END WHERE id=? AND state<>'sending'",
+                (queue_id,),
+            )
+
+    def edit_queue_item(self, queue_id: int, text: str, media: list, scheduled_at: str | None) -> None:
+        from app.media import payload_hash, validate_media
+
+        error = post_validation_error(text)
+        if error:
+            raise ValueError(error)
+        validate_media(media)
+        parsed = parse_iso(scheduled_at) if scheduled_at else None
+        if scheduled_at and not parsed:
+            raise ValueError("Неверная дата")
+        with self._write() as c:
+            self._editable(c, [queue_id])
+            row = c.execute("SELECT account_id FROM queue WHERE id=?", (queue_id,)).fetchone()
+            if not row:
+                raise ValueError("Пост уже удалён")
+            digest = payload_hash(text, media)
+            if c.execute(
+                "SELECT 1 FROM post_history WHERE account_id=? AND content_hash=? AND status='published'",
+                (row[0], digest),
+            ).fetchone():
+                raise ValueError("Пост уже опубликован")
+            c.execute(
+                "UPDATE queue SET content=?,content_hash=?,media_json=?,scheduled_at=?,record_key=?,state='pending',last_error='' WHERE id=?",
+                (
+                    text.strip(),
+                    digest,
+                    json.dumps(media, ensure_ascii=False),
+                    parsed.isoformat() if parsed else None,
+                    new_record_key(),
+                    queue_id,
+                ),
+            )
+
+    def bulk_delete(self, ids: list[int]) -> None:
+        with self._write() as c:
+            self._editable(c, ids)
+            c.executemany("DELETE FROM queue WHERE id=?", [(qid,) for qid in ids])
+
+    def restore_history(self, history_id: int) -> int | None:
+        with self._lock, self._connection() as c:
+            r = c.execute("SELECT * FROM post_history WHERE id=? AND status='skipped'", (history_id,)).fetchone()
+        if not r:
+            raise ValueError("Восстановить можно только пропущенный пост")
+        return self.enqueue_one(r["account_id"], r["content"], media=json.loads(r["media_json"]))
+
+    def save_draft(self, account_id: int, text: str, media: list, schedule_text: str = "") -> None:
+        with self._write() as c:
+            c.execute(
+                "INSERT INTO drafts(account_id,content,media_json,updated_at,schedule_text) VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET content=excluded.content,media_json=excluded.media_json,updated_at=excluded.updated_at,schedule_text=excluded.schedule_text",
+                (account_id, text, json.dumps(media, ensure_ascii=False), utcnow_iso(), schedule_text),
+            )
+
+    def get_draft(self, account_id: int) -> dict:
+        with self._lock, self._connection() as c:
+            r = c.execute("SELECT * FROM drafts WHERE account_id=?", (account_id,)).fetchone()
+            return dict(r) if r else {"content": "", "media_json": "[]", "schedule_text": ""}
+
+    def search_queue(self, account_id, query="", limit=100, offset=0):
+        with self._lock, self._connection() as c:
+            params = (account_id, query.casefold())
+            total = c.execute(
+                "SELECT COUNT(*) FROM queue WHERE account_id=? AND instr(casefold(content),?)>0", params
+            ).fetchone()[0]
+            rows = c.execute(
+                "SELECT * FROM queue WHERE account_id=? AND instr(casefold(content),?)>0 ORDER BY position,id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def failed_count(self, account_id):
+        with self._lock, self._connection() as c:
+            return c.execute(
+                "SELECT COUNT(*) FROM queue WHERE account_id=? AND state='failed'", (account_id,)
+            ).fetchone()[0]

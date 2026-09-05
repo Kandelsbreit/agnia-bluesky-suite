@@ -45,29 +45,52 @@ def main(argv: list[str] | None = None) -> int:
     if options.smoke_test:
         return _run_smoke()
 
-    from app.database import Database
-    from app.logging_setup import get_logger
-    from app.ui.main_window import MainWindow
+    from app.backup import apply_staged_restore
+    from app.instance import InstanceLock
 
-    logger = get_logger()
+    instance = None
+    logger = None
     try:
+        from app.backup import apply_staged_restore
+        from app.instance import InstanceLock
+        from app.paths import _migrate_legacy_db_if_needed, data_dir
+
+        root = data_dir()
+        instance = InstanceLock(root)
+        if not instance.acquire():
+            return 0
+        _migrate_legacy_db_if_needed(root)
+        apply_staged_restore(root)
+        from app.database import Database
+        from app.logging_setup import get_logger
+        from app.ui.main_window import MainWindow
+
+        logger = get_logger()
         db = Database()
+        db.recover_interrupted()
+        from app.backup import automatic_backup
+
+        try:
+            automatic_backup(db)
+        except Exception:
+            logger.exception("Не удалось создать автоматическую резервную копию")
         hidden = bool(options.tray or db.get_bool("start_minimized"))
         window = MainWindow(db, start_hidden=hidden)
         window.mainloop()
         return 0
     except Exception as exc:
-        logger.exception("Критическая ошибка запуска: %s", exc)
+        if logger:
+            logger.exception("Критическая ошибка запуска: %s", exc)
         try:
             from tkinter import messagebox
 
-            messagebox.showerror(
-                "Agnia Bluesky Suite",
-                "Программа не смогла запуститься. Подробности сохранены в журнале app.log.",
-            )
+            messagebox.showerror("Agnia Bluesky Suite", f"Программа не смогла запуститься: {exc}")
         except Exception:
             pass
         return 1
+    finally:
+        if instance:
+            instance.release()
 
 
 if __name__ == "__main__":

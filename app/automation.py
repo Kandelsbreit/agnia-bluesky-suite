@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from app.bluesky import BlueskyError, BlueskyGateway
+from app.bluesky import BlueskyError, BlueskyGateway, shared_gateway
 from app.database import Database
 from app.logging_setup import get_logger
 from app.utils import normalize_handle
@@ -122,7 +122,11 @@ class AutomationWorker(threading.Thread):
             account, password = self.db.get_account_secret(self.account_id)
             if not account or not password:
                 raise BlueskyError("Для выбранного аккаунта не сохранён App Password", auth_error=True)
-            gateway = self.gateway_factory(account["handle"], password)
+            gateway = (
+                shared_gateway(self.db, self.account_id)
+                if self.gateway_factory is BlueskyGateway
+                else self.gateway_factory(account["handle"], password)
+            )
             profile = gateway.login()
             self.db.update_connection(self.account_id, "Подключён", profile.display_name, profile.did)
             if self.mode == "likes":
@@ -269,10 +273,14 @@ class AutomationWorker(threading.Thread):
                             target_handle=author_handle,
                             message=str(exc),
                         )
-                        self._emit("log", level="error", message=f"[@{gateway.handle}] Не удалось лайкнуть @{author_handle}: {exc}")
+                        self._emit(
+                            "log",
+                            level="error",
+                            message=f"[@{gateway.handle}] Не удалось лайкнуть @{author_handle}: {exc}",
+                        )
                         if exc.auth_error:
                             return
-                        wait_time = exc.retry_after or 3
+                        wait_time = exc.retry_after or (60 if exc.rate_limited else 3)
                         if wait_time >= 5:
                             self._emit(
                                 "log",
@@ -283,23 +291,16 @@ class AutomationWorker(threading.Thread):
                             return
 
                 if not next_cursor or next_cursor == cursor:
-                    if cycle_completed < target and not self._stop_event.is_set():
-                        self._emit(
-                            "log",
-                            level="info",
-                            message=f"[@{gateway.handle}] Лента просмотрена. Пауза 20 сек. перед повторной проверкой...",
-                        )
-                        if not self._wait(20):
-                            return
-                        cursor = None
-                        continue
+                    self._emit("log", level="info", message="Лента просмотрена; цикл завершён.")
                     break
                 cursor = next_cursor
 
             if not self.options.continuous or self._stop_event.is_set():
                 break
 
-            jitter = random.randint(-max(0, self.options.cycle_jitter_minutes), max(0, self.options.cycle_jitter_minutes))
+            jitter = random.randint(
+                -max(0, self.options.cycle_jitter_minutes), max(0, self.options.cycle_jitter_minutes)
+            )
             rest_minutes = max(1, self.options.cycle_interval_minutes + jitter)
             rest_seconds = rest_minutes * 60
             wake_time = time.strftime("%H:%M", time.localtime(time.time() + rest_seconds))
@@ -364,15 +365,23 @@ class AutomationWorker(threading.Thread):
                 if result.skipped:
                     stats["skipped"] += 1
                     self.db.record_activity(
-                        self.account_id, "follow", "skipped", target_key=key,
-                        target_handle=result.target_handle or target, message=result.message,
+                        self.account_id,
+                        "follow",
+                        "skipped",
+                        target_key=key,
+                        target_handle=result.target_handle or target,
+                        message=result.message,
                     )
                     self._emit("log", level="info", message=f"@{target}: {result.message}")
                     continue
                 stats["completed"] += 1
                 self.db.record_activity(
-                    self.account_id, "follow", "success", target_key=key,
-                    target_handle=result.target_handle or target, message=result.message,
+                    self.account_id,
+                    "follow",
+                    "success",
+                    target_key=key,
+                    target_handle=result.target_handle or target,
+                    message=result.message,
                 )
                 get_logger().info("[@%s] Подписка на @%s", gateway.handle, result.target_handle or target)
                 self._emit("progress", current=stats["completed"], total=target_count, stats=dict(stats))
@@ -381,13 +390,17 @@ class AutomationWorker(threading.Thread):
             except BlueskyError as exc:
                 stats["errors"] += 1
                 self.db.record_activity(
-                    self.account_id, "follow", "error", target_key=target,
-                    target_handle=target, message=str(exc),
+                    self.account_id,
+                    "follow",
+                    "error",
+                    target_key=target,
+                    target_handle=target,
+                    message=str(exc),
                 )
                 self._emit("log", level="error", message=f"Не удалось подписаться на @{target}: {exc}")
                 if exc.auth_error:
                     break
-                if not self._wait(exc.retry_after or 4):
+                if not self._wait(exc.retry_after or (60 if exc.rate_limited else 4)):
                     break
 
 
@@ -522,4 +535,3 @@ class LikeAutomationManager:
                 self.callback(event)
             except Exception:
                 pass
-

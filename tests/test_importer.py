@@ -4,9 +4,7 @@ from app.importer import import_files, parse_content, read_text_file
 
 
 def test_parser_routes_blocks_and_accepts_at_prefix():
-    parsed = parse_content(
-        "@account: @ONE.BSKY.SOCIAL\n\nHello\nworld\n\n---\n\naccount: two.test\n\nSecond"
-    )
+    parsed = parse_content("@account: @ONE.BSKY.SOCIAL\n\nHello\nworld\n\n---\n\naccount: two.test\n\nSecond")
     assert [(item.account_handle, item.content) for item in parsed] == [
         ("one.bsky.social", "Hello\nworld"),
         ("two.test", "Second"),
@@ -14,9 +12,7 @@ def test_parser_routes_blocks_and_accepts_at_prefix():
 
 
 def test_parser_reports_missing_tag_empty_and_too_long():
-    parsed = parse_content(
-        "No tag\n\n---\n\n@account: empty.test\n\n---\n\n@account: long.test\n\n" + "x" * 301
-    )
+    parsed = parse_content("No tag\n\n---\n\n@account: empty.test\n\n---\n\n@account: long.test\n\n" + "x" * 301)
     assert len(parsed) == 3
     assert "метка" in parsed[0].error
     assert "Пустой" in parsed[1].error

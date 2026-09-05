@@ -55,4 +55,4 @@ def test_record_keys_are_unique_and_safe():
 def test_duration_and_filename_formatting():
     assert format_duration(65) == "01:05"
     assert format_duration(3661) == "01:01:01"
-    assert safe_filename(' bad:/name*? ') == "bad__name"
+    assert safe_filename(" bad:/name*? ") == "bad__name"

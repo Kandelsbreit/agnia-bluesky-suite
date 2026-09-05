@@ -51,17 +51,27 @@ def _migrate_legacy_db_if_needed(target_dir: Path) -> None:
             return
     except OSError:
         pass
+    import os
+    import sqlite3
+
+    temp = target_db.with_suffix(".migrating")
     try:
+        with sqlite3.connect(legacy_db) as source, sqlite3.connect(temp) as dest:
+            source.backup(dest)
+            dest.execute("PRAGMA journal_mode=DELETE")
+            if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise OSError("Исходная база повреждена")
+        key = legacy_dir / ".secret_key"
+        if key.exists():
+            (target_dir / ".secret_key").write_bytes(key.read_bytes())
         import shutil
 
-        target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(legacy_db, target_db)
-        for ext in ("-wal", "-shm"):
-            extra = legacy_dir / f"agnia_bluesky.db{ext}"
-            if extra.exists():
-                shutil.copy2(extra, target_dir / f"agnia_bluesky.db{ext}")
-    except OSError:
-        pass
+        if (legacy_dir / "media").exists():
+            shutil.copytree(legacy_dir / "media", target_dir / "media", dirs_exist_ok=True)
+        os.replace(temp, target_db)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def data_dir() -> Path:
@@ -80,7 +90,6 @@ def data_dir() -> Path:
                 root = _legacy_system_data_dir()
 
     root.mkdir(parents=True, exist_ok=True)
-    _migrate_legacy_db_if_needed(root)
     return root
 
 
@@ -98,5 +107,3 @@ def exports_dir() -> Path:
     result = data_dir() / "exports"
     result.mkdir(parents=True, exist_ok=True)
     return result
-
-

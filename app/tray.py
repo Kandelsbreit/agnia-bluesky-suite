@@ -8,7 +8,9 @@ from app.logging_setup import get_logger
 
 
 class TrayManager:
-    def __init__(self, icon_path, on_show: Callable[[], None], on_hide: Callable[[], None], on_quit: Callable[[], None]):
+    def __init__(
+        self, icon_path, on_show: Callable[[], None], on_hide: Callable[[], None], on_quit: Callable[[], None]
+    ):
         self.icon_path = icon_path
         self.on_show = on_show
         self.on_hide = on_hide

@@ -6,7 +6,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from app.bluesky import BlueskyError, BlueskyGateway
+from app.bluesky import BlueskyGateway
 from app.database import Database
 from app.ui.common import BLUE, GREEN, RED, clear_children, ui_call
 from app.utils import normalize_handle
@@ -118,16 +118,21 @@ class AccountDialog(ctk.CTkToplevel):
                 if self.account:
                     self.db.update_connection(int(self.account["id"]), "Подключён", profile.display_name, profile.did)
                 ui_call(self, lambda: self._test_done(True, f"Подключено: {profile.display_name} (@{profile.handle})"))
-            except BlueskyError as exc:
+            except Exception as exc:
                 if self.account:
-                    self.db.update_connection(int(self.account["id"]), "Ошибка авторизации" if exc.auth_error else "Ошибка сети")
+                    self.db.update_connection(
+                        int(self.account["id"]),
+                        "Ошибка авторизации" if getattr(exc, "auth_error", False) else "Ошибка сети",
+                    )
                 ui_call(self, lambda exc=exc: self._test_done(False, str(exc)))
 
         threading.Thread(target=work, name="account-login-test", daemon=True).start()
 
     def _test_done(self, success: bool, message: str) -> None:
         self.test_button.configure(state="normal")
-        self.status.configure(text=("Успешно: " if success else "Ошибка: ") + message, text_color=GREEN if success else RED)
+        self.status.configure(
+            text=("Успешно: " if success else "Ошибка: ") + message, text_color=GREEN if success else RED
+        )
 
     def save(self) -> None:
         values = self._values()
@@ -137,11 +142,7 @@ class AccountDialog(ctk.CTkToplevel):
         effective_password = password or ""
         if not effective_password and self.account:
             _, effective_password = self.db.get_account_secret(int(self.account["id"]))
-        verified = (
-            self.verified_profile
-            if self.verified_credentials == (handle, effective_password)
-            else None
-        )
+        verified = self.verified_profile if self.verified_credentials == (handle, effective_password) else None
         interval_changed = bool(
             self.account
             and (
@@ -235,9 +236,15 @@ class AccountsView(ctk.CTkFrame):
             )
             buttons = ctk.CTkFrame(card, fg_color="transparent")
             buttons.grid(row=0, column=1, rowspan=2, padx=10, pady=8)
-            ctk.CTkButton(buttons, text="Активный", width=82, command=lambda a=account: self.activate(a)).pack(side="left", padx=3)
-            ctk.CTkButton(buttons, text="Проверить", width=82, command=lambda a=account: self.test(a)).pack(side="left", padx=3)
-            ctk.CTkButton(buttons, text="Изменить", width=82, command=lambda a=account: self.edit(a)).pack(side="left", padx=3)
+            ctk.CTkButton(buttons, text="Активный", width=82, command=lambda a=account: self.activate(a)).pack(
+                side="left", padx=3
+            )
+            ctk.CTkButton(buttons, text="Проверить", width=82, command=lambda a=account: self.test(a)).pack(
+                side="left", padx=3
+            )
+            ctk.CTkButton(buttons, text="Изменить", width=82, command=lambda a=account: self.edit(a)).pack(
+                side="left", padx=3
+            )
             ctk.CTkButton(
                 buttons, text="Удалить", width=74, fg_color=RED, command=lambda a=account: self.delete(a)
             ).pack(side="left", padx=3)
@@ -268,8 +275,10 @@ class AccountsView(ctk.CTkFrame):
                 try:
                     profile = BlueskyGateway(current["handle"], password).test_connection()
                     self.db.update_connection(account_id, "Подключён", profile.display_name, profile.did)
-                except BlueskyError as exc:
-                    self.db.update_connection(account_id, "Ошибка авторизации" if exc.auth_error else "Ошибка сети")
+                except Exception as exc:
+                    self.db.update_connection(
+                        account_id, "Ошибка авторизации" if getattr(exc, "auth_error", False) else "Ошибка сети"
+                    )
             ui_call(self, self.refresh)
 
         threading.Thread(target=work, name=f"account-check-{account_id}", daemon=True).start()

@@ -74,13 +74,13 @@ def test_failed_attempt_retains_item_and_error(db):
     assert item["content"] == "Do not lose me"
 
 
-def test_skipped_item_enters_history_and_dedup_set(db):
+def test_skipped_item_enters_history_but_can_be_requeued(db):
     account = db.save_account("skip.test")
     queue_id = db.enqueue_one(account, "skip this")
     assert db.complete_queue_item(queue_id, "", "", status="skipped")
     history = db.get_history(account)
     assert history[0]["status"] == "skipped"
-    assert db.enqueue_one(account, "skip this") is None
+    assert db.enqueue_one(account, "skip this") is not None
 
 
 def test_confirmed_publish_wins_over_concurrent_delete_or_skip(db):
@@ -239,6 +239,3 @@ def test_reconcile_queue_with_published(db):
     assert history[0]["content"] == "post-beta"
     assert history[0]["status"] == "published"
     assert history[0]["post_uri"] == "at://did:plc:test/app.bsky.feed.post/3mupnujqcnfhv"
-
-
-

@@ -27,5 +27,3 @@ def test_empty_and_unknown_secret():
     assert unprotect_secret("") == ""
     with pytest.raises(SecretError):
         unprotect_secret("plain-password")
-
-

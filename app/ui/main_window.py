@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 
 import customtkinter as ctk
 
@@ -11,6 +12,7 @@ from app.paths import resource_path
 from app.scheduler import QueueScheduler
 from app.tray import TrayManager
 from app.ui.accounts_view import AccountsView
+from app.ui.common import drain_ui_callbacks, ui_call
 from app.ui.export_view import ExportView
 from app.ui.following_view import FollowingView
 from app.ui.likes_view import LikesView
@@ -43,10 +45,11 @@ class MainWindow(ctk.CTk):
         self.current_view = "queue"
         self._quitting = False
         self._tick_job: str | None = None
+        self._maintenance_stop = threading.Event()
 
         self.title("Agnia Bluesky Suite")
         self.geometry("1180x780")
-        self.minsize(980, 680)
+        self.minsize(1080, 720)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -61,14 +64,13 @@ class MainWindow(ctk.CTk):
         icon = resource_path("assets/icon.png")
         self.tray = TrayManager(icon, self.show_window, self.hide_window, self.quit_app)
         self.tray_started = self.tray.start() if self.enable_background else False
-        set_ui_callback(lambda line, level: self.after(0, self.views["settings"].append_log, line, level))
-
-        if self.enable_background and self.db.get_bool("auto_unpause_queues_on_start", True):
-            self.db.unpause_all_queues()
+        set_ui_callback(lambda line, level: ui_call(self, lambda: self.views["settings"].append_log(line, level)))
+        self._pump_ui()
 
         self.refresh_accounts()
         self.show_view("queue")
         if self.enable_background:
+            threading.Thread(target=self._maintenance, name="maintenance", daemon=True).start()
             self._schedule_tick()
             self.after(900, self.views["likes"].maybe_autostart)
         if self.start_hidden and sys.platform == "win32" and self.tray_started:
@@ -163,8 +165,9 @@ class MainWindow(ctk.CTk):
         self._update_sidebar_status()
 
     def _queue_changed(self, account_id: int) -> None:
-        self.scheduler.sync_accounts()
-        self.scheduler.wake(account_id)
+        if self.enable_background:
+            self.scheduler.sync_accounts()
+            self.scheduler.wake(account_id)
         self.views["queue"].refresh()
         self.views["queue"].refresh_accounts()
         self._update_sidebar_status()
@@ -210,7 +213,7 @@ class MainWindow(ctk.CTk):
 
     def show_window(self) -> None:
         try:
-            self.after(0, self._show_window_ui)
+            ui_call(self, self._show_window_ui)
         except Exception:
             pass
 
@@ -222,7 +225,7 @@ class MainWindow(ctk.CTk):
 
     def hide_window(self) -> None:
         try:
-            self.after(0, self.withdraw)
+            ui_call(self, self.withdraw)
         except Exception:
             pass
 
@@ -232,30 +235,80 @@ class MainWindow(ctk.CTk):
         else:
             self.quit_app()
 
-    def quit_app(self) -> None:
+    def _pump_ui(self):
+        drain_ui_callbacks()
+        if self.winfo_exists():
+            marker = self.db.path.parent / ".show-window"
+            if marker.exists():
+                marker.unlink(missing_ok=True)
+                self._show_window_ui()
+            self.after(50, self._pump_ui)
+
+    def report_callback_exception(self, exc, value, traceback):
+        get_logger().error("Ошибка интерфейса", exc_info=(exc, value, traceback))
+        from tkinter import messagebox
+
+        messagebox.showerror("Agnia Bluesky Suite", str(value), parent=self)
+
+    def quit_app(self):
+        if threading.current_thread() is not threading.main_thread():
+            ui_call(self, self.quit_app)
+            return
         if self._quitting:
             return
+        self.views["posting"].save_draft()
         self._quitting = True
+        self._maintenance_stop.set()
+        self.title("Agnia Bluesky Suite — завершение задач…")
+        self.views["likes"].stop()
+        following = self.views["following"].worker
+        if following:
+            following.stop()
+        self.views["export"].stop()
 
-        def finish() -> None:
-            get_logger().info("Agnia Bluesky Suite завершает работу")
-            set_ui_callback(None)
-            self.views["likes"].stop()
-            following_worker = self.views["following"].worker
-            if following_worker and following_worker.is_alive():
-                following_worker.stop()
-            if self.views["export"].running:
-                self.views["export"].stop()
-            self.scheduler.stop_all()
-            self.tray.stop()
-            if self._tick_job:
-                try:
-                    self.after_cancel(self._tick_job)
-                except Exception:
-                    pass
-            self.destroy()
+        def finish():
+            try:
+                self.scheduler.stop_all()
+                # Other workers are bounded by API timeouts. Keep the Tk event loop responsive.
+                for thread in list(threading.enumerate()):
+                    if thread is threading.current_thread() or thread is threading.main_thread():
+                        continue
+                    if thread.name.startswith(
+                        (
+                            "automation-",
+                            "export",
+                            "post-export",
+                            "maintenance",
+                            "queue-import",
+                            "import-preview",
+                            "media-import",
+                            "backup-",
+                            "account-",
+                            "queue-reconcile",
+                        )
+                    ):
+                        thread.join(timeout=60)
+                from app.backup import automatic_backup
 
-        try:
-            self.after(0, finish)
-        except Exception:
-            finish()
+                automatic_backup(self.db)
+            except Exception:
+                get_logger().exception("Ошибка завершения / резервного копирования")
+            ui_call(self, self._finish_quit)
+
+        threading.Thread(target=finish, name="shutdown", daemon=True).start()
+
+    def _finish_quit(self):
+        set_ui_callback(None)
+        self.tray.stop()
+        if self._tick_job:
+            self.after_cancel(self._tick_job)
+        self.destroy()
+
+    def _maintenance(self):
+        from app.backup import automatic_backup
+
+        while not self._maintenance_stop.wait(900):
+            try:
+                automatic_backup(self.db)
+            except Exception:
+                get_logger().exception("Не удалось создать резервную копию")

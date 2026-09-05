@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
 import sys
+import threading
 from collections.abc import Callable
-from tkinter import messagebox
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -10,7 +13,7 @@ from app import autostart
 from app.database import Database
 from app.logging_setup import LOG_FILE, clear_log_file, read_log_tail
 from app.paths import data_dir, exports_dir
-from app.ui.common import BLUE, GREEN, MUTED
+from app.ui.common import BLUE, GREEN, MUTED, ui_call
 
 
 class SettingsView(ctk.CTkFrame):
@@ -20,6 +23,7 @@ class SettingsView(ctk.CTkFrame):
         self.on_changed = on_changed
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.backup_busy = False
         self._build()
 
     def _build(self) -> None:
@@ -111,10 +115,10 @@ class SettingsView(ctk.CTkFrame):
         buttons.grid(row=0, column=1, sticky="e", padx=10, pady=(8, 2))
         ctk.CTkButton(buttons, text="Обновить", width=82, command=self.refresh_log).pack(side="left", padx=3)
         ctk.CTkButton(buttons, text="Очистить", width=82, command=self.clear_log).pack(side="left", padx=3)
-        ctk.CTkButton(buttons, text="История действий", width=120, command=self.show_activity).pack(
+        ctk.CTkButton(buttons, text="История действий", width=120, command=self.show_activity).pack(side="left", padx=3)
+        ctk.CTkButton(buttons, text="Файл журнала", width=105, fg_color=BLUE, command=self.open_log).pack(
             side="left", padx=3
         )
-        ctk.CTkButton(buttons, text="Файл журнала", width=105, fg_color=BLUE, command=self.open_log).pack(side="left", padx=3)
         ctk.CTkButton(buttons, text="Папка данных", width=105, command=lambda: autostart.open_folder(data_dir())).pack(
             side="left", padx=3
         )
@@ -125,16 +129,35 @@ class SettingsView(ctk.CTkFrame):
         self.log_box.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(5, 12))
         self.refresh_log()
 
+        backups = ctk.CTkFrame(scroll)
+        backups.grid(row=5, column=0, sticky="ew", padx=8, pady=6)
+        ctk.CTkLabel(backups, text="Резервные копии", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=12, pady=8
+        )
+        ctk.CTkLabel(
+            backups,
+            text="Автоматически: раз в сутки, последние 7 копий. Локальные копии содержат ключ аккаунтов.",
+            wraplength=850,
+        ).pack(anchor="w", padx=12)
+        bar = ctk.CTkFrame(backups, fg_color="transparent")
+        bar.pack(fill="x", padx=8, pady=8)
+        ctk.CTkButton(bar, text="Сохранить с паролем", command=self.make_backup).pack(side="left", padx=4)
+        ctk.CTkButton(bar, text="Восстановить копию", command=self.restore_backup).pack(side="left", padx=4)
+        ctk.CTkButton(
+            bar, text="Папка копий", command=lambda: autostart.open_folder(self.db.path.parent / "backups")
+        ).pack(side="left", padx=4)
+        self.backup_status = ctk.CTkLabel(backups, text="")
+        self.backup_status.pack(anchor="w", padx=12)
         ctk.CTkLabel(
             scroll,
             text=(
                 "Очереди, история и расписание сохраняются в SQLite после каждого изменения. "
-                "App Password в Windows защищён DPAPI текущего пользователя."
+                "Переносимые пароли защищены ключом из папки данных. Для переноса используйте копию с паролем."
             ),
             text_color=MUTED,
             justify="left",
             wraplength=850,
-        ).grid(row=5, column=0, sticky="w", padx=12, pady=(5, 12))
+        ).grid(row=6, column=0, sticky="w", padx=12, pady=(5, 12))
 
     def _number(self, key: str, *, integer: bool, minimum: float) -> str:
         raw = self.entries[key].get().strip().replace(",", ".")
@@ -142,7 +165,7 @@ class SettingsView(ctk.CTkFrame):
             value = int(raw) if integer else float(raw)
         except ValueError as exc:
             raise ValueError(f"Проверьте числовое поле «{key}»") from exc
-        if value < minimum:
+        if not math.isfinite(value) or value < minimum:
             raise ValueError(f"Значение «{key}» должно быть не меньше {minimum:g}")
         return str(value)
 
@@ -178,9 +201,7 @@ class SettingsView(ctk.CTkFrame):
                 "human_breaks": int(self.human_breaks_var.get()),
             }
         )
-        if sys.platform == "win32" and (
-            old_autostart != bool(self.autostart_var.get()) or self.autostart_var.get()
-        ):
+        if sys.platform == "win32" and (old_autostart != bool(self.autostart_var.get()) or self.autostart_var.get()):
             ok, message = autostart.set_enabled(bool(self.autostart_var.get()), bool(self.start_minimized_var.get()))
             if not ok:
                 messagebox.showerror("Автозапуск", message, parent=self)
@@ -212,7 +233,6 @@ class SettingsView(ctk.CTkFrame):
         self.log_box.delete("1.0", "end")
         self.log_box.insert("1.0", "Журнал очищен.")
 
-
     def open_log(self) -> None:
         try:
             if sys.platform == "win32":
@@ -241,3 +261,84 @@ class SettingsView(ctk.CTkFrame):
             )
         box.insert("1.0", "\n\n".join(blocks) or "История пока пуста.")
         box.configure(state="disabled")
+
+    def _backup_work(self, action, success):
+        if self.backup_busy:
+            return
+        self.backup_busy = True
+        self.backup_status.configure(text="Обработка…")
+
+        def run():
+            try:
+                action()
+                ui_call(self, lambda: self._backup_done(success, None))
+            except Exception as exc:
+                ui_call(self, lambda exc=exc: self._backup_done("", str(exc)))
+
+        threading.Thread(target=run, name="backup-operation", daemon=True).start()
+
+    def _backup_done(self, success, error):
+        self.backup_busy = False
+        self.backup_status.configure(text=error or success)
+        if error:
+            messagebox.showerror("Резервная копия", error, parent=self)
+        else:
+            messagebox.showinfo("Резервная копия", success, parent=self)
+
+    def make_backup(self):
+        if self.backup_busy:
+            return
+        dest = filedialog.asksaveasfilename(
+            parent=self,
+            defaultextension=".agnia",
+            initialfile="AgniaBluesky-backup.agnia",
+            filetypes=[("Защищённая копия", "*.agnia")],
+        )
+        if not dest:
+            return
+        password = simpledialog.askstring(
+            "Пароль копии",
+            "Придумайте пароль (минимум 8 символов). Он понадобится для восстановления.",
+            show="*",
+            parent=self,
+        )
+        if password is None:
+            return
+        if len(password) < 8:
+            messagebox.showerror("Пароль", "Минимум 8 символов", parent=self)
+            return
+        confirm = simpledialog.askstring("Пароль копии", "Повторите пароль", show="*", parent=self)
+        if confirm != password:
+            messagebox.showerror("Пароль", "Пароли не совпадают", parent=self)
+            return
+        from app.backup import create_backup
+
+        self._backup_work(lambda: create_backup(self.db, Path(dest), password), "Резервная копия сохранена.")
+
+    def restore_backup(self):
+        if self.backup_busy:
+            return
+        path = filedialog.askopenfilename(parent=self, filetypes=[("Копии Agnia", "*.agnia *.zip")])
+        if not path:
+            return
+        from app.backup import MAGIC, automatic_backup, stage_restore
+
+        with Path(path).open("rb") as f:
+            encrypted = f.read(len(MAGIC)) == MAGIC
+        password = (
+            simpledialog.askstring("Пароль", "Пароль резервной копии", show="*", parent=self) if encrypted else ""
+        )
+        if password is None:
+            return
+        if not messagebox.askyesno(
+            "Восстановление",
+            "При следующем запуске аккаунты, очередь, история и черновики будут заменены данными копии. Текущие данные сохранятся в автоматической копии. Продолжить?",
+            parent=self,
+        ):
+            return
+
+        def action():
+            automatic_backup(self.db, force=True)
+            stage_restore(Path(path), self.db.path.parent, password)
+
+        self._backup_work(action, "Копия проверена. Закройте и снова откройте программу для восстановления.")

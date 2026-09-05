@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -73,13 +74,13 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
 
 def _to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
-        return value
+        return {k: _to_dict(v) if isinstance(v, dict) or hasattr(v, "__dict__") else v for k, v in value.items()}
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", by_alias=True)
+        return value.model_dump(mode="json", by_alias=True, exclude_none=True)
     if hasattr(value, "dict"):
         return value.dict(by_alias=True)
     if hasattr(value, "__dict__"):
-        return vars(value)
+        return _to_dict(vars(value))
     raise TypeError(f"Unsupported Bluesky response type: {type(value).__name__}")
 
 
@@ -101,23 +102,30 @@ def _error_details(exc: Exception) -> BlueskyError:
         try:
             retry_after = max(1, int(float(header)))
         except (TypeError, ValueError):
+            from email.utils import parsedate_to_datetime
+
+            try:
+                retry_after = max(1, int(parsedate_to_datetime(header).timestamp() - time.time()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    reset = headers.get("ratelimit-reset") or headers.get("RateLimit-Reset")
+    if status == 429 and reset:
+        try:
+            retry_after = max(retry_after or 0, 1, int(float(reset) - time.time()))
+        except (ValueError, TypeError):
             pass
     code_lower = code.lower()
     msg_lower = message.lower()
     auth_error = (
         isinstance(exc, UnauthorizedError)
-        or status in {401, 403}
+        or status == 401
         or "expiredtoken" in code_lower
         or "invalidtoken" in code_lower
         or "token has expired" in msg_lower
         or "authentication required" in msg_lower
     )
     rate_limited = status == 429 or code_lower in {"ratelimitexceeded", "ratelimited"}
-    retryable = (
-        isinstance(exc, NetworkError | InvokeTimeoutError)
-        or rate_limited
-        or bool(status and status >= 500)
-    )
+    retryable = isinstance(exc, NetworkError | InvokeTimeoutError) or rate_limited or bool(status and status >= 500)
     return BlueskyError(
         message,
         retryable=retryable,
@@ -145,7 +153,10 @@ def extract_facets(text: str) -> list[models.AppBskyRichtextFacet.Main] | None:
         )
     url_pattern = re.compile(r"(?:^|(?<=\s))(https?://[^\s]+)")
     for match in url_pattern.finditer(text):
-        url = match.group(1).rstrip(".,!?:;()[]{}")
+        url = match.group(1).rstrip(".,!?:;")
+        for left, right in (("(", ")"), ("[", "]"), ("{", "}")):
+            while url.endswith(right) and url.count(right) > url.count(left):
+                url = url[:-1]
         start_char = match.start()
         byte_start = len(text[:start_char].encode("utf-8"))
         byte_end = byte_start + len(url.encode("utf-8"))
@@ -179,6 +190,9 @@ class BlueskyGateway:
         self._recent_posts_cache: list[dict] | None = None
         self._recent_posts_time: float = 0.0
         self._lock = threading.RLock()
+        self._cooldown_until = 0.0
+        self.session_store = None
+        self.session_string = ""
 
     @property
     def profile(self) -> Profile | None:
@@ -204,7 +218,19 @@ class BlueskyGateway:
                 return self._profile
             try:
                 client = self._new_client()
-                raw = client.login(self.handle, self.app_password)
+                if self.session_store and hasattr(client, "on_session_change"):
+                    client.on_session_change(lambda _event, session: self.session_store(session.export()))
+                try:
+                    raw = (
+                        client.login(session_string=self.session_string)
+                        if self.session_string and not force
+                        else client.login(self.handle, self.app_password)
+                    )
+                except Exception as exc:
+                    if not self.session_string or not _error_details(exc).auth_error:
+                        raise
+                    self.session_string = ""
+                    raw = client.login(self.handle, self.app_password)
                 self._client = client
                 self._profile = Profile(
                     handle=str(_field(raw, "handle", self.handle)),
@@ -226,18 +252,26 @@ class BlueskyGateway:
         return self._client
 
     def _with_reauth(self, action: Callable[[Client], Any]) -> Any:
-        client = self._authenticated()
-        try:
-            return action(client)
-        except Exception as exc:
-            details = _error_details(exc)
-            if details.auth_error and self.handle and self.app_password:
-                with self._lock:
-                    self._client = None
-                self.login(force=True)
-                assert self._client is not None
-                return action(self._client)
-            raise details from exc
+        with self._lock:
+            remaining = int(self._cooldown_until - time.monotonic())
+            if remaining > 0:
+                raise BlueskyError("Пауза запросов аккаунта", retryable=True, rate_limited=True, retry_after=remaining)
+            try:
+                client = self._authenticated()
+                try:
+                    return action(client)
+                except Exception as exc:
+                    details = _error_details(exc)
+                    if details.auth_error and self.handle and self.app_password:
+                        self._client = None
+                        self.login(force=True)
+                        return action(self._client)
+                    raise
+            except Exception as exc:
+                details = exc if isinstance(exc, BlueskyError) else _error_details(exc)
+                if details.rate_limited:
+                    self._cooldown_until = time.monotonic() + (details.retry_after or 60)
+                raise details from exc
 
     def resolve_profile(self, actor: str | None = None) -> Profile:
         clean = normalize_handle(actor or self.handle)
@@ -260,6 +294,7 @@ class BlueskyGateway:
         def action(client: Client):
             response = client.get_timeline(limit=min(100, max(1, limit)), cursor=cursor)
             return [_to_dict(item) for item in response.feed], response.cursor
+
         try:
             return self._with_reauth(action)
         except BlueskyError:
@@ -271,9 +306,11 @@ class BlueskyGateway:
         params: dict[str, Any] = {"feed": DISCOVER_FEED_URI, "limit": min(100, max(1, limit))}
         if cursor:
             params["cursor"] = cursor
+
         def action(client: Client):
             response = client.app.bsky.feed.get_feed(params=params)
             return [_to_dict(item) for item in response.feed], response.cursor
+
         try:
             return self._with_reauth(action)
         except BlueskyError:
@@ -285,9 +322,11 @@ class BlueskyGateway:
         params: dict[str, Any] = {"q": query.strip(), "limit": min(100, max(1, limit))}
         if cursor:
             params["cursor"] = cursor
+
         def action(client: Client):
             response = client.app.bsky.feed.search_posts(params=params)
             return [{"post": _to_dict(post)} for post in response.posts], response.cursor
+
         try:
             return self._with_reauth(action)
         except BlueskyError:
@@ -299,6 +338,7 @@ class BlueskyGateway:
         def action(client: Client):
             client.like(uri=uri, cid=cid)
             return ActionResult(True, False, "Лайк поставлен", target_key=uri)
+
         try:
             return self._with_reauth(action)
         except BlueskyError as exc:
@@ -319,6 +359,7 @@ class BlueskyGateway:
             return ActionResult(False, True, "Пустой handle")
         target_did = ""
         target_handle = clean
+
         def action(client: Client):
             nonlocal target_did, target_handle
             profile = client.get_profile(actor=clean)
@@ -332,6 +373,7 @@ class BlueskyGateway:
                 return ActionResult(False, True, "Уже есть подписка", target_handle, target_did)
             client.follow(subject=target_did)
             return ActionResult(True, False, "Подписка оформлена", target_handle, target_did)
+
         try:
             return self._with_reauth(action)
         except BlueskyError as exc:
@@ -346,115 +388,123 @@ class BlueskyGateway:
                 return ActionResult(False, True, "Уже есть подписка", target_handle, target_did)
             raise details from exc
 
-    def _verify_record(self, record_key: str, expected_text: str) -> PublishResult | None:
-        if not self._profile:
-            return None
-        def action(client: Client):
+    def _verify_record(
+        self, record_key: str, expected_text: str, expected_record: dict | None = None
+    ) -> PublishResult | None:
+        def action(client):
             response = client.com.atproto.repo.get_record(
                 models.ComAtprotoRepoGetRecord.Params(
-                    repo=self._profile.did,
-                    collection=POST_COLLECTION,
-                    rkey=record_key,
+                    repo=self._profile.did, collection=POST_COLLECTION, rkey=record_key
                 )
             )
-            actual_text = str(_field(_field(response, "value", {}), "text", ""))
-            if actual_text != expected_text:
-                return None
-            return PublishResult(
-                uri=str(_field(response, "uri", f"at://{self._profile.did}/{POST_COLLECTION}/{record_key}")),
-                cid=str(_field(response, "cid", "") or ""),
-                recovered_existing=True,
-            )
+            actual = _to_dict(_field(response, "value", {}))
+            if normalize_text(str(actual.get("text", ""))) != normalize_text(expected_text):
+                raise BlueskyError(
+                    "По этому ключу найден другой пост. Требуется ручная проверка.", code="RecordConflict"
+                )
+            if expected_record and actual.get("embed") != expected_record.get("embed"):
+                raise BlueskyError(
+                    "По этому ключу найдены другие вложения. Требуется ручная проверка.", code="RecordConflict"
+                )
+            return PublishResult(str(_field(response, "uri", "")), str(_field(response, "cid", "")), True)
+
         try:
             return self._with_reauth(action)
-        except Exception:
-            return None
+        except BlueskyError as exc:
+            if exc.code.lower() in {"recordnotfound", "notfound"}:
+                return None
+            raise
 
     def check_recent_post(self, text: str) -> PublishResult | None:
-        """Check if this post content already exists on the author's Bluesky profile."""
         clean = normalize_text(text)
         if not clean or not self.handle:
             return None
-        now = time.monotonic()
         with self._lock:
-            if self._recent_posts_cache is None or (now - self._recent_posts_time) > 60.0:
-                try:
-                    feed_items, _ = self.fetch_author_feed(self.handle, limit=50)
-                    self._recent_posts_cache = feed_items
-                    self._recent_posts_time = now
-                except Exception:
-                    return None
-            cached = self._recent_posts_cache or []
-        for item in cached:
-            post = item.get("post") or {}
-            record = post.get("record") or {}
-            post_text = normalize_text(_field(record, "text", ""))
-            if post_text and post_text == clean:
-                return PublishResult(
-                    uri=str(_field(post, "uri", "")),
-                    cid=str(_field(post, "cid", "")),
-                    recovered_existing=True,
-                )
+            now = time.monotonic()
+            if self._recent_posts_cache is None or now - self._recent_posts_time > 60:
+                self._recent_posts_cache = self.get_author_recent_posts(self.handle, limit=100)
+                self._recent_posts_time = now
+            for post in self._recent_posts_cache:
+                # Text-only comparison never establishes equivalence with a media post or reply.
+                if not post.get("has_embed") and not post.get("is_reply") and normalize_text(post["text"]) == clean:
+                    return PublishResult(post["uri"], post["cid"], True)
         return None
 
-    def publish_text(self, text: str, record_key: str | None = None) -> PublishResult:
-        clean_text = text.strip()
-        validation_error = post_validation_error(clean_text)
-        if validation_error:
-            raise BlueskyError(validation_error)
+    def prepare_record(self, text: str, media: list) -> dict:
+        from app.media import media_path, validate_media
 
-        valid_key = record_key or new_record_key()
-
-        def action(client: Client) -> PublishResult:
-            assert self._profile is not None
-            facets = extract_facets(clean_text)
-            record = models.AppBskyFeedPost.Record(
-                text=clean_text,
-                facets=facets,
-                created_at=client.get_current_time_iso(),
-            )
-            try:
-                response = client.app.bsky.feed.post.create(
-                    self._profile.did,
-                    record,
-                    rkey=valid_key,
+        error = post_validation_error(text)
+        if error:
+            raise BlueskyError(error, code="InvalidRecord")
+        validate_media(media)
+        client = self._authenticated()
+        facets = extract_facets(text.strip()) or []
+        # Resolve mentions to stable DIDs. A failed resolution is visible, never silently mislinked.
+        for match in re.finditer(r"(?<![\w@])@([a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z0-9-]+)", text.strip()):
+            raw = match.group(1).rstrip(".")
+            profile = self._with_reauth(lambda c, raw=raw: c.get_profile(actor=raw))
+            start = len(text.strip()[: match.start()].encode())
+            end = start + len(("@" + raw).encode())
+            if any(f.index.byte_start < end and start < f.index.byte_end for f in facets):
+                continue
+            facets.append(
+                models.AppBskyRichtextFacet.Main(
+                    index=models.AppBskyRichtextFacet.ByteSlice(byte_start=start, byte_end=end),
+                    features=[models.AppBskyRichtextFacet.Mention(did=str(_field(profile, "did", "")))],
                 )
-            except Exception as inner_exc:
-                inner_msg = str(inner_exc).lower()
-                if "invalid tid" in inner_msg or "invalid record key" in inner_msg:
-                    response = client.send_post(text=clean_text, facets=facets)
+            )
+        embed = None
+        if media and media[0]["kind"] == "link":
+            m = media[0]
+            embed = models.AppBskyEmbedExternal.Main(
+                external=models.AppBskyEmbedExternal.External(
+                    uri=m["uri"], title=m.get("title", ""), description=m.get("description", "")
+                )
+            )
+        elif media:
+            uploaded = []
+            for m in media:
+                blob = self._with_reauth(lambda c, m=m: c.upload_blob(media_path(m).read_bytes())).blob
+                if m["kind"] == "video":
+                    embed = models.AppBskyEmbedVideo.Main(video=blob, alt=m.get("alt", ""))
                 else:
-                    raise
-            return PublishResult(uri=str(response.uri), cid=str(response.cid))
+                    aspect = (
+                        models.AppBskyEmbedDefs.AspectRatio(width=m["width"], height=m["height"])
+                        if m.get("width")
+                        else None
+                    )
+                    uploaded.append(
+                        models.AppBskyEmbedImages.Image(image=blob, alt=m.get("alt", ""), aspect_ratio=aspect)
+                    )
+            if uploaded:
+                embed = models.AppBskyEmbedImages.Main(images=uploaded)
+        record = models.AppBskyFeedPost.Record(
+            text=text.strip(), facets=facets or None, embed=embed, created_at=client.get_current_time_iso()
+        )
+        return record.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    def publish_record(self, record: dict, record_key: str) -> PublishResult:
+        existing = self._verify_record(record_key, record["text"], record)
+        if existing:
+            return existing
+
+        def action(client):
+            model = models.AppBskyFeedPost.Record.model_validate(record)
+            response = client.app.bsky.feed.post.create(self._profile.did, model, rkey=record_key)
+            self._recent_posts_cache = None
+            return PublishResult(str(response.uri), str(response.cid))
 
         try:
             return self._with_reauth(action)
         except BlueskyError as exc:
-            lowered = f"{exc.code} {exc}".lower()
-            might_exist = (
-                "already" in lowered
-                or "recordexists" in lowered
-                or exc.retryable
-            )
-            if might_exist:
-                recovered = self._verify_record(valid_key, clean_text)
+            if exc.retryable or "already" in str(exc).lower() or "recordexists" in exc.code.lower():
+                recovered = self._verify_record(record_key, record["text"], record)
                 if recovered:
                     return recovered
             raise
-        except Exception as exc:
-            details = _error_details(exc)
-            lowered = f"{details.code} {details}".lower()
-            might_exist = (
-                "already" in lowered
-                or "recordexists" in lowered
-                or isinstance(exc, NetworkError | InvokeTimeoutError)
-                or details.retryable
-            )
-            if might_exist:
-                recovered = self._verify_record(valid_key, clean_text)
-                if recovered:
-                    return recovered
-            raise details from exc
+
+    def publish_text(self, text: str, record_key: str | None = None) -> PublishResult:
+        return self.publish_record(self.prepare_record(text, []), record_key or new_record_key())
 
     def fetch_author_feed(
         self,
@@ -475,40 +525,80 @@ class BlueskyGateway:
         except Exception as exc:
             raise _error_details(exc) from exc
 
-    def get_author_recent_posts(
-        self,
-        actor: str,
-        *,
-        limit: int = 100,
-    ) -> list[dict]:
+    def get_author_recent_posts(self, actor: str, *, limit: int = 100) -> list[dict]:
         clean = normalize_handle(actor or self.handle)
         if not clean:
             return []
-        try:
-            feed_items, _ = self.fetch_author_feed(clean, limit=limit)
-        except Exception:
-            return []
-        results: list[dict] = []
+        profile = self.login() if clean == self.handle and self.app_password else self.resolve_profile(clean)
+        feed_items, _ = self.fetch_author_feed(profile.did, limit=limit)
+        results = []
         for item in feed_items:
             post = _field(item, "post") or {}
+            uri = str(_field(post, "uri", ""))
+            author = _field(post, "author") or {}
+            if _field(item, "reason") is not None or not uri.startswith(f"at://{profile.did}/{POST_COLLECTION}/"):
+                continue
+            if _field(author, "did", profile.did) != profile.did:
+                continue
             record = _field(post, "record") or {}
             text = str(_field(record, "text", "") or "").strip()
             if not text:
                 continue
-            uri = str(_field(post, "uri", "") or "")
-            cid = str(_field(post, "cid", "") or "")
-            created_at = str(
-                _field(record, "createdAt", "") or _field(record, "created_at", "") or utcnow_iso()
-            )
-            rkey = uri.rsplit("/", 1)[-1] if uri else ""
             results.append(
                 {
                     "text": text,
                     "uri": uri,
-                    "cid": cid,
-                    "created_at": created_at,
-                    "rkey": rkey,
+                    "cid": str(_field(post, "cid", "")),
+                    "created_at": str(
+                        _field(record, "createdAt", "") or _field(record, "created_at", "") or utcnow_iso()
+                    ),
+                    "rkey": uri.rsplit("/", 1)[-1],
+                    "has_embed": bool(_field(record, "embed")),
+                    "is_reply": bool(_field(record, "reply")),
                 }
             )
         return results
 
+
+_pool_lock = threading.RLock()
+_pool: dict[tuple, BlueskyGateway] = {}
+
+
+def shared_gateway(db, account_id: int) -> BlueskyGateway:
+    import hashlib
+
+    from app.security import protect_secret, unprotect_secret
+
+    account, password = db.get_account_secret(account_id)
+    if not account or not password:
+        raise BlueskyError("Нужен App Password", auth_error=True)
+    fingerprint = hashlib.sha256((account["handle"] + "\0" + password).encode()).hexdigest()
+    key = (str(db.path.resolve()), account_id)
+    with _pool_lock:
+        gateway = _pool.get(key)
+        if gateway and getattr(gateway, "fingerprint", "") == fingerprint:
+            return gateway
+        gateway = BlueskyGateway(account["handle"], password)
+        gateway.fingerprint = fingerprint
+        stored = db.get_setting(f"session_{account_id}", "")
+        try:
+            value = json.loads(unprotect_secret(stored)) if stored else {}
+            if value.get("fingerprint") == fingerprint:
+                gateway.session_string = value["session"]
+        except Exception:
+            gateway.session_string = ""
+
+        def save(value):
+            # Credential tokens must never reach the log.
+            try:
+                db.set_setting(
+                    f"session_{account_id}", protect_secret(json.dumps({"fingerprint": fingerprint, "session": value}))
+                )
+            except Exception:
+                from app.logging_setup import get_logger
+
+                get_logger().warning("Не удалось сохранить сессию аккаунта %s", account_id)
+
+        gateway.session_store = save
+        _pool[key] = gateway
+        return gateway

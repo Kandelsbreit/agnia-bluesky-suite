@@ -120,22 +120,19 @@ class PermanentFailureGateway(SuccessfulGateway):
         raise BlueskyError("invalid record", retryable=False)
 
 
-def test_non_retryable_api_error_skips_post_and_continues_queue(db):
+def test_non_retryable_api_error_preserves_failed_post(db):
     PermanentFailureGateway.calls = []
     account = db.save_account("invalid.test", "password", interval_minutes=60, jitter_minutes=0)
-    db.enqueue_one(account, "Keep invalid item")
+    qid = db.enqueue_one(account, "Keep invalid item")
     worker = AccountQueueWorker(account, db, gateway_factory=PermanentFailureGateway)
     worker.start()
     try:
         worker.publish_now()
-        assert wait_until(lambda: db.queue_count(account) == 0)
-        history = db.get_history(account)
-        assert len(history) == 1
-        assert history[0]["status"] == "skipped"
-        acc = db.get_account(account)
-        assert not bool(acc["queue_paused"])
-        assert acc["next_scheduled_at"] is not None
-        assert "invalid record" in acc["last_error"]
+        assert wait_until(lambda: db.get_queue_item(qid)["state"] == "failed")
+        assert db.queue_count(account) == 1
+        assert db.get_history(account) == []
+        assert "invalid record" in db.get_queue_item(qid)["last_error"]
+        assert not bool(db.get_account(account)["queue_paused"])
     finally:
         worker.stop()
 
@@ -193,6 +190,3 @@ def test_worker_startup_and_scheduler_reconciliation(db):
     assert len(history) == 1
     assert history[0]["content"] == "Overnight published post"
     assert history[0]["post_uri"] == "at://did/app.bsky.feed.post/reconciled-key"
-
-
-
