@@ -677,6 +677,17 @@ class Database:
             )
             return cursor.rowcount
 
+    def clear_all_queues(self) -> int:
+        with self._write() as connection:
+            self._editable(
+                connection, [r[0] for r in connection.execute("SELECT id FROM queue")]
+            )
+            cursor = connection.execute("DELETE FROM queue")
+            connection.execute(
+                "UPDATE accounts SET next_scheduled_at=NULL,retry_count=0,last_error=''"
+            )
+            return cursor.rowcount
+
     def move_queue_item(self, account_id: int, queue_id: int, direction: str) -> bool:
         with self._write() as connection:
             self._editable(connection, [queue_id])

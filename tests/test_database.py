@@ -239,3 +239,31 @@ def test_reconcile_queue_with_published(db):
     assert history[0]["content"] == "post-beta"
     assert history[0]["status"] == "published"
     assert history[0]["post_uri"] == "at://did:plc:test/app.bsky.feed.post/3mupnujqcnfhv"
+
+
+def test_clear_queue_and_clear_all_queues(db):
+    acc1 = db.save_account("clear1.test")
+    acc2 = db.save_account("clear2.test")
+    db.enqueue_one(acc1, "msg1")
+    db.enqueue_one(acc1, "msg2")
+    db.enqueue_one(acc2, "msg3")
+    assert db.queue_count(acc1) == 2
+    assert db.queue_count(acc2) == 1
+
+    # Clear only acc1
+    deleted = db.clear_queue(acc1)
+    assert deleted == 2
+    assert db.queue_count(acc1) == 0
+    assert db.queue_count(acc2) == 1
+
+    # Add more to acc1 and acc2
+    db.enqueue_one(acc1, "msg4")
+    assert db.queue_count(acc1) == 1
+    assert db.queue_count(acc2) == 1
+
+    # Clear all queues
+    total_deleted = db.clear_all_queues()
+    assert total_deleted == 2
+    assert db.queue_count(acc1) == 0
+    assert db.queue_count(acc2) == 0
+

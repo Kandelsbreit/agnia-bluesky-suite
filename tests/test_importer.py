@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.importer import import_files, parse_content, read_text_file
 
 
@@ -25,6 +27,7 @@ def test_parser_uses_grapheme_limit_not_code_points():
 
 
 def test_parser_enforces_atproto_utf8_byte_limit():
+    pytest.importorskip("regex")
     parsed = parse_content("@account: emoji.test\n\n" + "👩‍💻" * 300)
     assert not parsed[0].valid
     assert "3300/3000 байт" in parsed[0].error

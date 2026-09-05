@@ -81,6 +81,14 @@ class QueueView(ctk.CTkFrame):
             ("▼", lambda: self.move_selected("down"), 35),
         ]:
             ctk.CTkButton(controls, text=label, width=width, command=command).pack(side="left", padx=3)
+        ctk.CTkButton(
+            controls,
+            text="Очистить всю очередь",
+            width=175,
+            fg_color="#C0392B",
+            hover_color="#962D22",
+            command=self.clear_queue_dialog,
+        ).pack(side="right", padx=3)
         self.error_label = ctk.CTkLabel(self, text="", wraplength=880, anchor="w", justify="left", text_color="#E29A2D")
         self.error_label.grid(row=5, column=0, sticky="ew", padx=16, pady=4)
         pages = ctk.CTkFrame(self, fg_color="transparent")
@@ -232,6 +240,88 @@ class QueueView(ctk.CTkFrame):
         ids = self.selected()
         if ids and messagebox.askyesno("Удаление", f"Удалить выбранные посты ({len(ids)})?", parent=self):
             self.guard(lambda: self.db.bulk_delete(ids))
+
+    def clear_queue_dialog(self):
+        if not self.account_id:
+            messagebox.showinfo("Очистка очереди", "Выберите аккаунт.", parent=self)
+            return
+        account = self.db.get_account(self.account_id)
+        handle = account["handle"] if account else f"ID {self.account_id}"
+        count = self.db.queue_count(self.account_id)
+        all_accounts = self.db.get_accounts()
+        total_all = sum(self.db.queue_count(a["id"]) for a in all_accounts)
+        if total_all == 0:
+            messagebox.showinfo("Очистка очереди", "Очередь уже пуста.", parent=self)
+            return
+        if len(all_accounts) > 1 and total_all > count:
+            dialog = ctk.CTkToplevel(self)
+            dialog.title("Очистить очередь")
+            dialog.geometry("450x240")
+            dialog.transient(self.winfo_toplevel())
+            dialog.resizable(False, False)
+            dialog.grab_set()
+
+            ctk.CTkLabel(dialog, text="Очистка очереди постов", font=ctk.CTkFont(size=15, weight="bold")).pack(
+                padx=20, pady=(18, 8)
+            )
+            ctk.CTkLabel(
+                dialog,
+                text=f"В очереди @{handle}: {count} постов\nВсего по всем аккаунтам: {total_all} постов",
+                justify="center",
+            ).pack(padx=20, pady=(0, 16))
+
+            btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+            btn_frame.pack(fill="x", padx=20, pady=4)
+
+            def do_clear_current():
+                dialog.destroy()
+                self.guard(lambda: self.db.clear_queue(self.account_id))
+                self.on_accounts_changed()
+                messagebox.showinfo("Очистка очереди", f"Очередь аккаунта @{handle} очищена.", parent=self)
+
+            def do_clear_all():
+                dialog.destroy()
+                if messagebox.askyesno(
+                    "Очистить ВСЕ очереди",
+                    f"Удалить ВСЕ {total_all} постов из очередей ВСЕХ аккаунтов?\n\nЭто действие необратимо.",
+                    parent=self,
+                ):
+                    self.guard(lambda: self.db.clear_all_queues())
+                    self.on_accounts_changed()
+                    messagebox.showinfo(
+                        "Очистка очереди", f"Все очереди ({total_all} постов) полностью очищены.", parent=self
+                    )
+
+            if count > 0:
+                ctk.CTkButton(
+                    btn_frame,
+                    text=f"Очистить очередь @{handle} ({count})",
+                    fg_color="#D97706",
+                    hover_color="#B45309",
+                    command=do_clear_current,
+                ).pack(fill="x", pady=3)
+            ctk.CTkButton(
+                btn_frame,
+                text=f"Очистить ВСЕ очереди ({total_all})",
+                fg_color="#DC2626",
+                hover_color="#B91C1C",
+                command=do_clear_all,
+            ).pack(fill="x", pady=3)
+            ctk.CTkButton(btn_frame, text="Отмена", fg_color="transparent", command=dialog.destroy).pack(
+                fill="x", pady=3
+            )
+        else:
+            if count == 0:
+                messagebox.showinfo("Очистка очереди", f"Очередь аккаунта @{handle} уже пуста.", parent=self)
+                return
+            if messagebox.askyesno(
+                "Очистка очереди",
+                f"Удалить все {count} постов из очереди аккаунта @{handle}?\n\nЭто действие необратимо.",
+                parent=self,
+            ):
+                self.guard(lambda: self.db.clear_queue(self.account_id))
+                self.on_accounts_changed()
+                messagebox.showinfo("Очистка очереди", f"Очередь аккаунта @{handle} полностью очищена.", parent=self)
 
     def move_selected(self, direction):
         ids = self.selected()

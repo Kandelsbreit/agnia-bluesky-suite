@@ -4,7 +4,7 @@
 
 ## Скачать и обновить
 
-В [Releases](https://github.com/Kandelsbreit/agnia-bluesky-suite/releases/latest) скачайте `AgniaBlueskySuite-v1.3.0-windows-x64.zip`, распакуйте и запустите `AgniaBlueskySuite.exe`.
+В [Releases](https://github.com/Kandelsbreit/agnia-bluesky-suite/releases/latest) скачайте `AgniaBlueskySuite-v1.3.1-windows-x64.zip`, распакуйте и запустите `AgniaBlueskySuite.exe`.
 
 Для обновления полностью завершите предыдущую версию через меню трея и замените EXE в прежней папке. Не удаляйте папку `data`: в ней находятся аккаунты, ключ, очередь, черновики и вложения. Перед переходом на новую схему база автоматически копируется в `data/backups`. При переносе на другой компьютер удобнее использовать защищённую резервную копию из настроек.
 
@@ -77,4 +77,4 @@ dist\AgniaBlueskySuite.exe --smoke-test
 
 Реальный офлайн-тест Tk: `python tests/gui_smoke.py` (Linux: `xvfb-run -a python tests/gui_smoke.py`). CI проверяет интерфейс на Linux, тесты на Windows, собирает один EXE, запускает packaged smoke-test и только после успешных проверок публикует новый релиз из `main`.
 
-Аудит и границы проверки: [docs/AUDIT_1.3.0.md](docs/AUDIT_1.3.0.md).
+Аудит и границы проверки: [docs/AUDIT_1.3.1.md](docs/AUDIT_1.3.1.md).
