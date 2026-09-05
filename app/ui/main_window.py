@@ -165,6 +165,7 @@ class MainWindow(ctk.CTk):
     def _queue_changed(self, account_id: int) -> None:
         self.scheduler.sync_accounts()
         self.scheduler.wake(account_id)
+        self.views["queue"].refresh()
         self.views["queue"].refresh_accounts()
         self._update_sidebar_status()
 

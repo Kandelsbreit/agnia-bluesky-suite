@@ -10,7 +10,7 @@ from typing import Any
 from app.logging_setup import get_logger
 from app.paths import database_path
 from app.security import SecretError, protect_secret, unprotect_secret
-from app.utils import content_hash, new_record_key, normalize_handle, utcnow_iso
+from app.utils import content_hash, new_record_key, normalize_handle, normalize_text, utcnow_iso
 
 DEFAULT_SETTINGS: dict[str, str] = {
     "theme": "dark",
@@ -453,7 +453,7 @@ class Database:
             connection.execute(f"UPDATE accounts SET {sql}, updated_at=? WHERE id=?", params)
 
     # Queue
-    def enqueue_one(self, account: int | str, text: str) -> int | None:
+    def enqueue_one(self, account: int | str, text: str, at_top: bool = True) -> int | None:
         account_id = account if isinstance(account, int) else self.ensure_account(account)
         normalized = text.strip()
         if not normalized:
@@ -472,16 +472,24 @@ class Database:
             ).fetchone()
             if duplicate:
                 return None
-            row = connection.execute(
-                "SELECT COALESCE(MAX(position), 0) AS max_position FROM queue WHERE account_id=?",
-                (account_id,),
-            ).fetchone()
+            if at_top:
+                row = connection.execute(
+                    "SELECT COALESCE(MIN(position), 1) AS min_position FROM queue WHERE account_id=?",
+                    (account_id,),
+                ).fetchone()
+                new_position = int(row["min_position"]) - 1
+            else:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(position), 0) AS max_position FROM queue WHERE account_id=?",
+                    (account_id,),
+                ).fetchone()
+                new_position = int(row["max_position"]) + 1
             cursor = connection.execute(
                 """
                 INSERT INTO queue(account_id,content,content_hash,record_key,position,created_at)
                 VALUES(?,?,?,?,?,?)
                 """,
-                (account_id, normalized, digest, new_record_key(), int(row["max_position"]) + 1, now),
+                (account_id, normalized, digest, new_record_key(), new_position, now),
             )
             return int(cursor.lastrowid)
 
@@ -776,6 +784,98 @@ class Database:
                 "DELETE FROM queue WHERE account_id=? AND content_hash=?",
                 (account_id, digest),
             )
+
+    def reconcile_queue_with_published(
+        self,
+        account_id: int,
+        published_posts: list[dict[str, Any]],
+    ) -> int:
+        """Reconcile queue items against already published posts from Bluesky or history.
+
+        Removes matching queue items and records them in post_history.
+        """
+        reconciled_count = 0
+        now = utcnow_iso()
+
+        with self._write() as connection:
+            queue_rows = connection.execute(
+                "SELECT id, content, content_hash, record_key FROM queue WHERE account_id=?",
+                (account_id,),
+            ).fetchall()
+            if not queue_rows:
+                return 0
+
+            queue_by_hash: dict[str, list[sqlite3.Row]] = {}
+            queue_by_norm: dict[str, list[sqlite3.Row]] = {}
+            for q in queue_rows:
+                ch = str(q["content_hash"])
+                queue_by_hash.setdefault(ch, []).append(q)
+                nt = normalize_text(str(q["content"]))
+                if nt:
+                    queue_by_norm.setdefault(nt, []).append(q)
+
+            matched_queue_ids: set[int] = set()
+            for post in published_posts:
+                text = str(post.get("text") or "").strip()
+                if not text:
+                    continue
+                uri = str(post.get("uri") or "")
+                cid = str(post.get("cid") or "")
+                rkey = str(post.get("rkey") or "") or (uri.rstrip("/").split("/")[-1] if uri else "")
+                created_at = str(post.get("created_at") or now)
+
+                ch = content_hash(text)
+                nt = normalize_text(text)
+
+                matching = queue_by_hash.get(ch) or queue_by_norm.get(nt) or []
+                for q in matching:
+                    qid = int(q["id"])
+                    if qid in matched_queue_ids:
+                        continue
+                    matched_queue_ids.add(qid)
+                    final_rkey = rkey or str(q["record_key"])
+                    connection.execute(
+                        """
+                        INSERT INTO post_history(
+                            account_id,content,content_hash,record_key,status,post_uri,post_cid,completed_at
+                        ) VALUES(?,?,?,?, 'published',?,?,?)
+                        ON CONFLICT(account_id,content_hash) DO UPDATE SET
+                            record_key=excluded.record_key,
+                            status='published',
+                            post_uri=excluded.post_uri,
+                            post_cid=excluded.post_cid,
+                            completed_at=excluded.completed_at
+                        """,
+                        (account_id, q["content"], q["content_hash"], final_rkey, uri, cid, created_at),
+                    )
+                    connection.execute("DELETE FROM queue WHERE id=?", (qid,))
+                    reconciled_count += 1
+
+            pruned_cursor = connection.execute(
+                """
+                DELETE FROM queue
+                WHERE account_id=? AND content_hash IN (
+                    SELECT content_hash FROM post_history WHERE account_id=? AND status='published'
+                )
+                """,
+                (account_id, account_id),
+            )
+            reconciled_count += pruned_cursor.rowcount
+
+        if reconciled_count > 0:
+            self.record_activity(
+                account_id,
+                "reconcile",
+                "success",
+                message=f"Автоматически пропущено {reconciled_count} уже опубликованных постов",
+            )
+            get_logger().info(
+                "[Account %s] Сверка с Bluesky: пропущено %d опубликованных постов из очереди",
+                account_id,
+                reconciled_count,
+            )
+
+        return reconciled_count
 
     def get_history(self, account_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock, self._connection() as connection:

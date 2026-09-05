@@ -193,3 +193,52 @@ def test_post_exists_in_history_and_prune_queue(db):
     assert reopened.queue_count(account) == 0
 
 
+def test_enqueue_one_at_top_vs_bottom(db):
+    account = db.save_account("priority.test")
+    id1 = db.enqueue_one(account, "bulk-1", at_top=False)
+    id2 = db.enqueue_one(account, "bulk-2", at_top=False)
+    assert id1 is not None and id2 is not None
+
+    # First item should be bulk-1
+    first = db.next_queue_item(account)
+    assert first["content"] == "bulk-1"
+
+    # Now add manual post with default at_top=True
+    manual_id = db.enqueue_one(account, "urgent manual post", at_top=True)
+    assert manual_id is not None
+
+    # Next queue item must now be the urgent manual post!
+    next_item = db.next_queue_item(account)
+    assert next_item["id"] == manual_id
+    assert next_item["content"] == "urgent manual post"
+
+
+def test_reconcile_queue_with_published(db):
+    account = db.save_account("reconcile.test")
+    db.enqueue_one(account, "post-alpha", at_top=False)
+    db.enqueue_one(account, "post-beta", at_top=False)
+    db.enqueue_one(account, "post-gamma", at_top=False)
+    assert db.queue_count(account) == 3
+
+    published = [
+        {
+            "text": "post-beta",
+            "uri": "at://did:plc:test/app.bsky.feed.post/3mupnujqcnfhv",
+            "cid": "bafyreibeta",
+            "created_at": "2026-09-05T08:00:00Z",
+            "rkey": "3mupnujqcnfhv",
+        }
+    ]
+    reconciled = db.reconcile_queue_with_published(account, published)
+    assert reconciled == 1
+    assert db.queue_count(account) == 2
+
+    # Verify post-beta was moved to history
+    history = db.get_history(account)
+    assert len(history) == 1
+    assert history[0]["content"] == "post-beta"
+    assert history[0]["status"] == "published"
+    assert history[0]["post_uri"] == "at://did:plc:test/app.bsky.feed.post/3mupnujqcnfhv"
+
+
+

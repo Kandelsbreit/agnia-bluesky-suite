@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -123,6 +124,39 @@ def _error_details(exc: Exception) -> BlueskyError:
         retry_after=retry_after,
         code=code,
     )
+
+
+def extract_facets(text: str) -> list[models.AppBskyRichtextFacet.Main] | None:
+    facets: list[models.AppBskyRichtextFacet.Main] = []
+    hashtag_pattern = re.compile(r"(?:^|(?<=\s))#([^\s#.,!?:;()\[\]{}]+)")
+    for match in hashtag_pattern.finditer(text):
+        tag_word = match.group(1)
+        full_tag = "#" + tag_word
+        start_char = match.start()
+        byte_start = len(text[:start_char].encode("utf-8"))
+        byte_end = byte_start + len(full_tag.encode("utf-8"))
+        facets.append(
+            models.AppBskyRichtextFacet.Main(
+                index=models.AppBskyRichtextFacet.ByteSlice(byte_start=byte_start, byte_end=byte_end),
+                features=[models.AppBskyRichtextFacet.Tag(tag=tag_word)],
+            )
+        )
+    url_pattern = re.compile(r"(?:^|(?<=\s))(https?://[^\s]+)")
+    for match in url_pattern.finditer(text):
+        url = match.group(1).rstrip(".,!?:;()[]{}")
+        start_char = match.start()
+        byte_start = len(text[:start_char].encode("utf-8"))
+        byte_end = byte_start + len(url.encode("utf-8"))
+        facets.append(
+            models.AppBskyRichtextFacet.Main(
+                index=models.AppBskyRichtextFacet.ByteSlice(byte_start=byte_start, byte_end=byte_end),
+                features=[models.AppBskyRichtextFacet.Link(uri=url)],
+            )
+        )
+    if not facets:
+        return None
+    facets.sort(key=lambda f: f.index.byte_start)
+    return facets
 
 
 class BlueskyGateway:
@@ -371,8 +405,10 @@ class BlueskyGateway:
 
         def action(client: Client) -> PublishResult:
             assert self._profile is not None
+            facets = extract_facets(clean_text)
             record = models.AppBskyFeedPost.Record(
                 text=clean_text,
+                facets=facets,
                 created_at=client.get_current_time_iso(),
             )
             try:
@@ -384,7 +420,7 @@ class BlueskyGateway:
             except Exception as inner_exc:
                 inner_msg = str(inner_exc).lower()
                 if "invalid tid" in inner_msg or "invalid record key" in inner_msg:
-                    response = client.send_post(text=clean_text)
+                    response = client.send_post(text=clean_text, facets=facets)
                 else:
                     raise
             return PublishResult(uri=str(response.uri), cid=str(response.cid))
@@ -436,3 +472,41 @@ class BlueskyGateway:
             return [_to_dict(item) for item in response.feed], response.cursor
         except Exception as exc:
             raise _error_details(exc) from exc
+
+    def get_author_recent_posts(
+        self,
+        actor: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict]:
+        clean = normalize_handle(actor or self.handle)
+        if not clean:
+            return []
+        try:
+            feed_items, _ = self.fetch_author_feed(clean, limit=limit)
+        except Exception:
+            return []
+        results: list[dict] = []
+        for item in feed_items:
+            post = item.get("post") or {}
+            record = post.get("record") or {}
+            text = str(_field(record, "text", "") or "").strip()
+            if not text:
+                continue
+            uri = str(_field(post, "uri", "") or "")
+            cid = str(_field(post, "cid", "") or "")
+            created_at = str(
+                _field(record, "createdAt", "") or _field(record, "created_at", "") or utcnow_iso()
+            )
+            rkey = uri.rsplit("/", 1)[-1] if uri else ""
+            results.append(
+                {
+                    "text": text,
+                    "uri": uri,
+                    "cid": cid,
+                    "created_at": created_at,
+                    "rkey": rkey,
+                }
+            )
+        return results
+

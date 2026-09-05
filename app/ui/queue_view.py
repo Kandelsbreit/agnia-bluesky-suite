@@ -68,6 +68,8 @@ class QueueView(ctk.CTkFrame):
         self.pause_button.pack(side="left", padx=6)
         self.unpause_all_btn = ctk.CTkButton(buttons, text="Запустить все очереди", fg_color=BLUE, command=self.unpause_all)
         self.unpause_all_btn.pack(side="left", padx=6)
+        self.sync_button = ctk.CTkButton(buttons, text="Сверить с Bluesky", width=135, fg_color=BLUE, command=self.sync_with_bluesky)
+        self.sync_button.pack(side="left", padx=6)
         self.skip_button = ctk.CTkButton(buttons, text="Пропустить", width=105, command=self.skip_next)
         self.skip_button.pack(side="left", padx=6)
         self.delete_next_button = ctk.CTkButton(buttons, text="Удалить", width=90, fg_color=RED, command=self.delete_next)
@@ -256,6 +258,39 @@ class QueueView(ctk.CTkFrame):
         self.on_accounts_changed()
         self.refresh()
         messagebox.showinfo("Очереди", f"Все очереди запущены (снято с паузы: {count}).", parent=self)
+
+    def sync_with_bluesky(self) -> None:
+        if not self.account_id:
+            return
+        account = self.db.get_account(self.account_id)
+        if not account:
+            return
+        self.sync_button.configure(state="disabled")
+        self.worker_status.configure(text="Сверка с Bluesky...")
+
+        def work() -> None:
+            count = self.scheduler.reconcile_account(self.account_id)
+
+            def done() -> None:
+                self.sync_button.configure(state="normal")
+                self.refresh()
+                self.on_accounts_changed()
+                if count > 0:
+                    messagebox.showinfo(
+                        "Сверка с Bluesky",
+                        f"Успешно пропущено {count} постов, которые уже были опубликованы в Bluesky.",
+                        parent=self,
+                    )
+                else:
+                    messagebox.showinfo(
+                        "Сверка с Bluesky",
+                        "Новых опубликованных постов в ленте Bluesky не обнаружено. Очередь актуальна.",
+                        parent=self,
+                    )
+
+            ui_call(self, done)
+
+        threading.Thread(target=work, name="queue-reconcile", daemon=True).start()
 
     def skip_next(self) -> None:
         if self.account_id and self.cached_next_id and messagebox.askyesno(

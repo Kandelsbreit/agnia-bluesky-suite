@@ -34,6 +34,8 @@ class AccountQueueWorker:
         self._thread: threading.Thread | None = None
         self._gateway: BlueskyGateway | None = None
         self._credential_fingerprint: tuple[str, str] | None = None
+        self._last_reconcile_time: float = 0.0
+        self._reconcile_interval: float = 600.0  # 10 minutes
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -54,6 +56,41 @@ class AccountQueueWorker:
     def publish_now(self) -> None:
         self._publish_now.set()
         self._wake.set()
+
+    def reconcile_published_posts(self, force: bool = False) -> int:
+        now = time.monotonic()
+        if not force and (now - self._last_reconcile_time) < self._reconcile_interval:
+            return 0
+        self._last_reconcile_time = now
+        account, password = self.db.get_account_secret(self.account_id)
+        if not account or not password:
+            return 0
+        try:
+            gateway = self._gateway_for(account["handle"], password)
+            if hasattr(gateway, "get_author_recent_posts"):
+                published = gateway.get_author_recent_posts(account["handle"], limit=100)
+            else:
+                published = []
+            count = self.db.reconcile_queue_with_published(self.account_id, published)
+            if count > 0:
+                get_logger().info(
+                    "[@%s] Автоматическая сверка: пропущено %d постов, уже опубликованных в Bluesky",
+                    account["handle"],
+                    count,
+                )
+                if self.status_callback:
+                    try:
+                        self.status_callback(self.account_id)
+                    except Exception:
+                        pass
+            return count
+        except Exception as exc:
+            get_logger().warning(
+                "[@%s] Ошибка автоматической сверки с Bluesky: %s",
+                account.get("handle", self.account_id),
+                exc,
+            )
+            return 0
 
     def _set_status(self, status: str) -> None:
         changed = status != self.status
@@ -84,6 +121,7 @@ class AccountQueueWorker:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
+                self.reconcile_published_posts(force=(self._last_reconcile_time == 0.0))
                 account, password = self.db.get_account_secret(self.account_id)
                 if not account:
                     all_ids = {int(a["id"]) for a in self.db.get_accounts()}
@@ -326,3 +364,31 @@ class QueueScheduler:
             worker = self.workers.pop(account_id, None)
         if worker:
             worker.stop()
+
+    def reconcile_account(self, account_id: int) -> int:
+        worker = self.worker(account_id)
+        if worker:
+            return worker.reconcile_published_posts(force=True)
+        account, password = self.db.get_account_secret(account_id)
+        if account and password:
+            gw = BlueskyGateway(account["handle"], password)
+            if hasattr(gw, "get_author_recent_posts"):
+                posts = gw.get_author_recent_posts(account["handle"], limit=100)
+            else:
+                posts = []
+            cnt = self.db.reconcile_queue_with_published(account_id, posts)
+            if self.status_callback:
+                try:
+                    self.status_callback(account_id)
+                except Exception:
+                    pass
+            return cnt
+        return 0
+
+    def reconcile_all(self) -> dict[int, int]:
+        results: dict[int, int] = {}
+        for account in self.db.get_accounts():
+            aid = int(account["id"])
+            results[aid] = self.reconcile_account(aid)
+        return results
+

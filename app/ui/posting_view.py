@@ -144,13 +144,15 @@ class PostingView(ctk.CTkFrame):
         if not checked:
             return
         account_id, text = checked
-        queue_id = self.db.enqueue_one(account_id, text)
+        queue_id = self.db.enqueue_one(account_id, text, at_top=True)
         if queue_id is None:
             self.status.configure(text="Такой пост уже есть в очереди или истории", text_color=RED)
             return
-        self.db.record_activity(account_id, "queue_add", "success", target_key=str(queue_id), message="Добавлен вручную")
+        self.db.record_activity(
+            account_id, "queue_add", "success", target_key=str(queue_id), message="Добавлен вручную в начало очереди"
+        )
         self.on_queue_changed(account_id)
-        self.status.configure(text="Добавлено в очередь", text_color=GREEN)
+        self.status.configure(text="Добавлен в начало очереди (следующий к публикации)", text_color=GREEN)
         self.clear(keep_status=True)
 
     def clear(self, keep_status: bool = False) -> None:

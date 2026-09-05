@@ -138,3 +138,77 @@ def test_publish_reauthenticates_automatically_on_expired_token():
     assert result.cid == "fresh-cid"
     assert client.login_count == 2
     assert client.post_attempts == 2
+
+
+def test_extract_facets_byte_indices_and_tags():
+    from app.bluesky import extract_facets
+
+    text = "Spread wide and waiting. #ts #питер https://example.com/test"
+    facets = extract_facets(text)
+    assert facets is not None
+    assert len(facets) == 3
+
+    # 1. #ts
+    f0 = facets[0]
+    assert f0.features[0].tag == "ts"
+    assert text.encode("utf-8")[f0.index.byte_start:f0.index.byte_end].decode("utf-8") == "#ts"
+
+    # 2. #питер (Cyrillic UTF-8 multi-byte)
+    f1 = facets[1]
+    assert f1.features[0].tag == "питер"
+    assert text.encode("utf-8")[f1.index.byte_start:f1.index.byte_end].decode("utf-8") == "#питер"
+
+    # 3. URL
+    f2 = facets[2]
+    assert f2.features[0].uri == "https://example.com/test"
+    assert text.encode("utf-8")[f2.index.byte_start:f2.index.byte_end].decode("utf-8") == "https://example.com/test"
+
+
+def test_publish_passes_facets_to_record():
+    records_received = []
+
+    class FacetInspectClient(FakeClient):
+        def create_post(self, repo, record, rkey):
+            records_received.append(record)
+            return super().create_post(repo, record, rkey)
+
+    client = FacetInspectClient()
+    gateway = BlueskyGateway("me.test", "app-password", client_factory=lambda **_kwargs: client)
+    gateway.publish_text("Waiting for you... #nsfw #trans", "facet-key")
+
+    assert len(records_received) == 1
+    rec = records_received[0]
+    assert rec.facets is not None
+    assert len(rec.facets) == 2
+    assert rec.facets[0].features[0].tag == "nsfw"
+    assert rec.facets[1].features[0].tag == "trans"
+
+
+def test_get_author_recent_posts():
+    class FeedClient(FakeClient):
+        def get_author_feed(self, actor, limit=100, cursor=None, filter=None):
+            return SimpleNamespace(
+                feed=[
+                    SimpleNamespace(
+                        post=SimpleNamespace(
+                            uri="at://did:plc:me/app.bsky.feed.post/post1",
+                            cid="cid1",
+                            record=SimpleNamespace(
+                                text="Hello recent post #1",
+                                createdAt="2026-09-05T08:00:00Z",
+                            ),
+                        )
+                    )
+                ],
+                cursor=None,
+            )
+
+    client = FeedClient()
+    gateway = BlueskyGateway("me.test", "app-password", client_factory=lambda **_kwargs: client)
+    posts = gateway.get_author_recent_posts("me.test")
+    assert len(posts) == 1
+    assert posts[0]["text"] == "Hello recent post #1"
+    assert posts[0]["uri"] == "at://did:plc:me/app.bsky.feed.post/post1"
+    assert posts[0]["rkey"] == "post1"
+
+

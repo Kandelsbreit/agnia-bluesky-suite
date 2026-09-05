@@ -163,3 +163,36 @@ def test_deduplication_prevents_reposting_from_another_machine(db):
         worker.stop()
 
 
+class ReconcileGateway(SuccessfulGateway):
+    def get_author_recent_posts(self, actor, limit=100):
+        return [
+            {
+                "text": "Overnight published post",
+                "uri": "at://did/app.bsky.feed.post/reconciled-key",
+                "cid": "reconciled-cid",
+                "created_at": "2026-09-05T01:00:00Z",
+                "rkey": "reconciled-key",
+            }
+        ]
+
+
+def test_worker_startup_and_scheduler_reconciliation(db):
+    account = db.save_account("reconcile.worker.test", "password", interval_minutes=60, jitter_minutes=0)
+    db.enqueue_one(account, "Overnight published post")
+    db.enqueue_one(account, "Pending post")
+    assert db.queue_count(account) == 2
+
+    worker = AccountQueueWorker(account, db, gateway_factory=ReconcileGateway)
+    reconciled = worker.reconcile_published_posts(force=True)
+    assert reconciled == 1
+    assert db.queue_count(account) == 1
+    remaining = db.next_queue_item(account)
+    assert remaining["content"] == "Pending post"
+
+    history = db.get_history(account)
+    assert len(history) == 1
+    assert history[0]["content"] == "Overnight published post"
+    assert history[0]["post_uri"] == "at://did/app.bsky.feed.post/reconciled-key"
+
+
+
