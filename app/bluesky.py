@@ -78,6 +78,8 @@ def _to_dict(value: Any) -> dict[str, Any]:
         return value.model_dump(mode="json", by_alias=True)
     if hasattr(value, "dict"):
         return value.dict(by_alias=True)
+    if hasattr(value, "__dict__"):
+        return vars(value)
     raise TypeError(f"Unsupported Bluesky response type: {type(value).__name__}")
 
 
@@ -488,8 +490,8 @@ class BlueskyGateway:
             return []
         results: list[dict] = []
         for item in feed_items:
-            post = item.get("post") or {}
-            record = post.get("record") or {}
+            post = _field(item, "post") or {}
+            record = _field(post, "record") or {}
             text = str(_field(record, "text", "") or "").strip()
             if not text:
                 continue

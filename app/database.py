@@ -453,7 +453,7 @@ class Database:
             connection.execute(f"UPDATE accounts SET {sql}, updated_at=? WHERE id=?", params)
 
     # Queue
-    def enqueue_one(self, account: int | str, text: str, at_top: bool = True) -> int | None:
+    def enqueue_one(self, account: int | str, text: str, at_top: bool = False) -> int | None:
         account_id = account if isinstance(account, int) else self.ensure_account(account)
         normalized = text.strip()
         if not normalized:
